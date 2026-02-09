@@ -13,8 +13,21 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID_RAW = os.getenv("ADMIN_ID")  # ضعه في Variables على Railway
 FACTOR = Decimal("100")  # حذف صفرين
 MODE_KEY = "mode"        # old_to_new | new_to_old
+
+# إشعار دخول المستخدم (مرة واحدة لكل تشغيل للبوت)
+NOTIFIED_USERS = set()
+
+
+def _get_admin_id() -> int | None:
+    if not ADMIN_ID_RAW:
+        return None
+    try:
+        return int(ADMIN_ID_RAW.strip())
+    except Exception:
+        return None
 
 
 # ================= واجهة القوائم =================
@@ -69,7 +82,6 @@ def normalize_amount(text: str) -> Decimal:
     t = (text or "").strip()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
 
-    # استخرج أول رقم (يسمح بفواصل وآحاد عشرية)
     m = re.search(r"[-+]?\d[\d,\s]*([.]\d+)?", t)
     if not m:
         raise ValueError("No number found")
@@ -79,11 +91,6 @@ def normalize_amount(text: str) -> Decimal:
 
 
 def fmt_number(d: Decimal) -> str:
-    """
-    تنسيق لطيف:
-    - إذا عدد صحيح: بدون كسور وبفواصل آلاف
-    - إذا فيه كسور: يظهر كما هو (ونتركه بسيط)
-    """
     if d == d.to_integral_value():
         return f"{int(d):,}"
     s = format(d.normalize(), "f").rstrip("0").rstrip(".")
@@ -95,6 +102,24 @@ def fmt_number(d: Decimal) -> str:
 
 # ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # إشعار للأدمن عند دخول مستخدم (مرة واحدة لكل تشغيل)
+    admin_id = _get_admin_id()
+    user = update.effective_user
+    if admin_id and user and user.id not in NOTIFIED_USERS:
+        NOTIFIED_USERS.add(user.id)
+        username = f"@{user.username}" if user.username else "بدون"
+        full_name = (user.full_name or "").strip() or "بدون"
+        msg = (
+            "🚨 مستخدم دخل البوت\n"
+            f"ID: {user.id}\n"
+            f"Username: {username}\n"
+            f"Name: {full_name}"
+        )
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=msg)
+        except Exception:
+            pass
+
     context.user_data.pop(MODE_KEY, None)
     await update.effective_message.reply_text(WELCOME_TEXT, reply_markup=main_menu())
 
@@ -112,29 +137,37 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(HELP_TEXT, reply_markup=back_menu())
         return
 
-    if q.data == "old_to_new":
-        context.user_data[MODE_KEY] = "old_to_new"
-        await q.edit_message_text("✍️ اكتب المبلغ بالليرة القديمة:", reply_markup=back_menu())
-        return
-
     if q.data == "new_to_old":
         context.user_data[MODE_KEY] = "new_to_old"
-        await q.edit_message_text("✍️ اكتب المبلغ بالليرة الجديدة:", reply_markup=back_menu())
+        await q.edit_message_text(
+            "🧮 تحويل من جديد إلى قديم\n"
+            "اكتب المبلغ بالعملة الجديدة الآن:\n"
+            "مثال: 1250",
+            reply_markup=back_menu(),
+        )
+        return
+
+    if q.data == "old_to_new":
+        context.user_data[MODE_KEY] = "old_to_new"
+        await q.edit_message_text(
+            "🧮 تحويل من قديم إلى جديد\n"
+            "اكتب المبلغ بالعملة القديمة الآن:\n"
+            "مثال: 125000",
+            reply_markup=back_menu(),
+        )
         return
 
 
 async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get(MODE_KEY)
     if mode not in ("old_to_new", "new_to_old"):
-        # تجاهل إذا لم يحدد وضع
         return
 
     try:
         amount = normalize_amount(update.effective_message.text)
     except Exception:
         await update.effective_message.reply_text(
-            "❌ ما قدرت أفهم الرقم.\n"
-            "اكتب رقم فقط مثل: 125000 أو 125,000",
+            "❌ ما قدرت أفهم الرقم.\nاكتب رقم فقط مثل: 125000 أو 125,000",
             reply_markup=back_menu(),
         )
         return
