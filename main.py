@@ -1,9 +1,8 @@
 import os
 import re
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -13,47 +12,51 @@ from telegram.ext import (
     filters,
 )
 
-# ===== إعدادات التحويل =====
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 FACTOR = Decimal("100")  # حذف صفرين
-
-# مفاتيح الحالة
-MODE_KEY = "mode"  # "old_to_new" | "new_to_old"
+MODE_KEY = "mode"        # old_to_new | new_to_old
 
 
-def _menu_keyboard() -> InlineKeyboardMarkup:
+# ================= واجهة القوائم =================
+def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("🔁 قديم → جديد", callback_data="old_to_new"),
-                InlineKeyboardButton("🔁 جديد → قديم", callback_data="new_to_old"),
+                InlineKeyboardButton("🔁 من قديم إلى جديد", callback_data="old_to_new"),
+                InlineKeyboardButton("🔁 من جديد إلى قديم", callback_data="new_to_old"),
             ],
             [InlineKeyboardButton("ℹ️ شرح سريع", callback_data="quick_help")],
         ]
     )
 
 
+def back_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back")]])
+
+
 WELCOME_TEXT = (
-    "👋 <b>أهلاً بك في بوت تحويل العملة</b>\n\n"
-    "بعد حذف صفرين من العملة قد يصير لَخبَطة بالحسابات.\n"
-    "هذا البوت يحوّل أي مبلغ بسرعة ودقة.\n\n"
-    "📌 اختر نوع التحويل من الأزرار بالأسفل ثم اكتب المبلغ."
+    "👋🇸🇾 أهلاً بك في بوت تحويل الليرة السورية\n\n"
+    "بعد حذف صفرين من الليرة السورية قد يحدث بعض الالتباس في الحسابات،\n"
+    "هذا البوت يساعدك على تحويل أي مبلغ بين الليرة القديمة والجديدة بسرعة ودقة 💱\n\n"
+    "📌 اختر نوع التحويل من الأزرار بالأسفل ثم اكتب المبلغ ✍️"
 )
 
-QUICK_HELP_TEXT = (
-    "ℹ️ <b>شرح سريع – حذف صفرين من الليرة</b>\n\n"
-    "✅ تم حذف <b>صفرين</b> من العملة.\n"
-    "يعني: <b>كل 100 ليرة قديمة = 1 ليرة جديدة</b>\n\n"
-    "🔁 <b>التحويل:</b>\n"
-    "• <b>قديم → جديد:</b> ÷ 100  (مثال: 1,000 قديم = 10 جديد)\n"
-    "• <b>جديد → قديم:</b> × 100  (مثال: 10 جديد = 1,000 قديم)\n\n"
-    "✍️ <b>طريقة الاستخدام:</b>\n"
-    "1) اختر نوع التحويل\n"
-    "2) اكتب المبلغ بالأرقام فقط (مسموح فواصل مثل 1,250)\n\n"
-    "للرجوع للقائمة ارسل /start"
+HELP_TEXT = (
+    "🇸🇾 شرح سريع – تحويل الليرة السورية\n\n"
+    "تم حذف صفرين من الليرة السورية، أي أن:\n"
+    "100 ليرة قديمة = 1 ليرة جديدة\n\n"
+    "طريقة التحويل:\n\n"
+    "🔁 من قديم إلى جديد\n"
+    "قسمة المبلغ على 100\n"
+    "مثال: 50,000 قديم = 500 جديد\n\n"
+    "🔁 من جديد إلى قديم\n"
+    "ضرب المبلغ × 100\n"
+    "مثال: 500 جديد = 50,000 قديم\n\n"
+    "اختر نوع التحويل من الأزرار ثم اكتب المبلغ ليتم الحساب مباشرة."
 )
 
 
-# تحويل الأرقام العربية (٠١٢٣...) إلى إنجليزية
+# ================= أدوات =================
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
 _EASTERN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
@@ -63,178 +66,114 @@ def normalize_amount(text: str) -> Decimal:
     يقبل مثل: 125000 / 125,000 / ١٢٥٠٠٠ / 125000 ليرة
     ويرجع Decimal.
     """
-    t = text.strip()
+    t = (text or "").strip()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
 
-    # استخرج أول رقم/قيمة (يسمح بفواصل وآحاد عشرية)
-    # مثال: "1,250.50 ليرة" -> "1,250.50"
+    # استخرج أول رقم (يسمح بفواصل وآحاد عشرية)
     m = re.search(r"[-+]?\d[\d,\s]*([.]\d+)?", t)
     if not m:
-        raise InvalidOperation("No number found")
+        raise ValueError("No number found")
 
-    num = m.group(0)
-
-    # إزالة الفراغات والفواصل
-    num = num.replace(" ", "").replace(",", "")
-
-    # منع أرقام فارغة
-    if num in ("", "+", "-"):
-        raise InvalidOperation("Empty")
-
+    num = m.group(0).replace(" ", "").replace(",", "")
     return Decimal(num)
 
 
 def fmt_number(d: Decimal) -> str:
     """
-    تنسيق رقم بشكل لطيف:
-    - إذا عدد صحيح: بدون كسور
-    - إذا فيه كسور: حتى 2 رقم عشري (قابل للتعديل)
+    تنسيق لطيف:
+    - إذا عدد صحيح: بدون كسور وبفواصل آلاف
+    - إذا فيه كسور: يظهر كما هو (ونتركه بسيط)
     """
-    # تطبيع لإزالة -0
-    if d == 0:
-        d = Decimal("0")
-
     if d == d.to_integral_value():
-        # فواصل آلاف
         return f"{int(d):,}"
-    # تقريب إلى خانتين
-    q = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    # إزالة أصفار زائدة
-    s = format(q, "f").rstrip("0").rstrip(".")
-    # فواصل آلاف للجزء الصحيح
+    s = format(d.normalize(), "f").rstrip("0").rstrip(".")
     if "." in s:
         whole, frac = s.split(".")
-        whole_fmt = f"{int(whole):,}"
-        return f"{whole_fmt}.{frac}"
+        return f"{int(whole):,}.{frac}"
     return f"{int(Decimal(s)):,}"
 
 
-async def send_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, *, edit: bool = False):
-    if update.callback_query and edit:
-        await update.callback_query.edit_message_text(
-            WELCOME_TEXT,
-            reply_markup=_menu_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
-    else:
-        await update.effective_message.reply_text(
-            WELCOME_TEXT,
-            reply_markup=_menu_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
-
-
+# ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(MODE_KEY, None)
-    await send_menu(update, context, edit=False)
+    await update.effective_message.reply_text(WELCOME_TEXT, reply_markup=main_menu())
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    data = q.data
-
-    if data in ("old_to_new", "new_to_old"):
-        context.user_data[MODE_KEY] = data
-
-        if data == "old_to_new":
-            prompt = (
-                "🧮 <b>تحويل قديم → جديد</b>\n\n"
-                "اكتب المبلغ <b>بالعملة القديمة</b> الآن:\n"
-                "مثال: 125000"
-            )
-        else:
-            prompt = (
-                "🧮 <b>تحويل جديد → قديم</b>\n\n"
-                "اكتب المبلغ <b>بالعملة الجديدة</b> الآن:\n"
-                "مثال: 1250"
-            )
-
-        await q.edit_message_text(prompt, parse_mode=ParseMode.HTML)
+    if q.data == "back":
+        context.user_data.pop(MODE_KEY, None)
+        await q.edit_message_text(WELCOME_TEXT, reply_markup=main_menu())
         return
 
-    if data == "quick_help":
-        await q.edit_message_text(
-            QUICK_HELP_TEXT,
-            reply_markup=_menu_keyboard(),
-            parse_mode=ParseMode.HTML,
-        )
+    if q.data == "quick_help":
+        await q.edit_message_text(HELP_TEXT, reply_markup=back_menu())
         return
 
-    # fallback
-    await send_menu(update, context, edit=True)
+    if q.data == "old_to_new":
+        context.user_data[MODE_KEY] = "old_to_new"
+        await q.edit_message_text("✍️ اكتب المبلغ بالليرة القديمة:", reply_markup=back_menu())
+        return
+
+    if q.data == "new_to_old":
+        context.user_data[MODE_KEY] = "new_to_old"
+        await q.edit_message_text("✍️ اكتب المبلغ بالليرة الجديدة:", reply_markup=back_menu())
+        return
 
 
 async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get(MODE_KEY)
     if mode not in ("old_to_new", "new_to_old"):
-        # المستخدم كتب رقم بدون اختيار وضع
-        await update.effective_message.reply_text(
-            "اختَر نوع التحويل أولاً من القائمة 👇\n\n/send /start",
-        )
-        await send_menu(update, context, edit=False)
+        # تجاهل إذا لم يحدد وضع
         return
 
-    text = update.effective_message.text or ""
     try:
-        amount = normalize_amount(text)
+        amount = normalize_amount(update.effective_message.text)
     except Exception:
         await update.effective_message.reply_text(
             "❌ ما قدرت أفهم الرقم.\n"
-            "اكتب رقم فقط مثل: 125000 أو 125,000\n\n"
-            "للرجوع للقائمة: /start"
+            "اكتب رقم فقط مثل: 125000 أو 125,000",
+            reply_markup=back_menu(),
         )
         return
 
     if amount < 0:
-        await update.effective_message.reply_text(
-            "❌ رجاءً اكتب مبلغ موجب.\n\nللرجوع: /start"
-        )
+        await update.effective_message.reply_text("❌ رجاءً اكتب مبلغ موجب.", reply_markup=back_menu())
         return
 
     if mode == "old_to_new":
         old_val = amount
-        new_val = (amount / FACTOR)
-        rule = "تم حذف صفرين (÷100)"
-        title = "✅ نتيجة التحويل (قديم → جديد)"
+        new_val = amount / FACTOR
+        reply = (
+            "💱 ✅ نتيجة التحويل\n\n"
+            f"• المبلغ القديم: {fmt_number(old_val)}\n"
+            f"• المبلغ الجديد: {fmt_number(new_val)}"
+        )
     else:
         new_val = amount
-        old_val = (amount * FACTOR)
-        rule = "إرجاع صفرين (×100)"
-        title = "✅ نتيجة التحويل (جديد → قديم)"
+        old_val = amount * FACTOR
+        reply = (
+            "💱 ✅ نتيجة التحويل\n\n"
+            f"• المبلغ الجديد: {fmt_number(new_val)}\n"
+            f"• المبلغ القديم: {fmt_number(old_val)}"
+        )
 
-    reply = (
-        f"{title}\n\n"
-        f"• المبلغ القديم: <b>{fmt_number(old_val)}</b>\n"
-        f"• المبلغ الجديد: <b>{fmt_number(new_val)}</b>\n"
-        f"• القاعدة: <i>{rule}</i>\n\n"
-        "🔁 لتحويل رقم آخر اضغط زر من القائمة أو ارسل /start"
-    )
-
-    await update.effective_message.reply_text(reply, parse_mode=ParseMode.HTML)
-
-    # خليه يبقى على نفس الوضع (إذا بدك يرجع للقائمة مباشرة احذف السطرين تحت)
-    # context.user_data.pop(MODE_KEY, None)
+    await update.effective_message.reply_text(reply, reply_markup=back_menu())
 
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(QUICK_HELP_TEXT, parse_mode=ParseMode.HTML)
-
-
+# ================= تشغيل =================
 def main():
-    token = os.getenv("BOT_TOKEN")
-    if not token:
+    if not BOT_TOKEN:
         raise RuntimeError("Missing BOT_TOKEN environment variable")
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_amount))
 
-    # Railway: الأفضل Polling (أسهل)
     app.run_polling(drop_pending_updates=True)
 
 
