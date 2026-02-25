@@ -91,19 +91,27 @@ def normalize_amount(text: str) -> Decimal:
     return Decimal(num)
 
 
+# ✅ التعديل الوحيد هنا
 def fmt_number(d: Decimal) -> str:
+    d = d.normalize()
+
     if d == d.to_integral_value():
-        return f"{int(d):,}"
-    s = format(d.normalize(), "f").rstrip("0").rstrip(".")
-    if "." in s:
-        whole, frac = s.split(".")
-        return f"{int(whole):,}.{frac}"
-    return f"{int(Decimal(s)):,}"
+        n = int(d)
+
+        if n >= 1_000_000_000:
+            return f"{n // 1_000_000_000} مليار"
+        elif n >= 1_000_000:
+            return f"{n // 1_000_000} مليون"
+        elif n >= 1_000:
+            return f"{n // 1_000} ألف"
+        else:
+            return str(n)
+
+    return format(d, "f").rstrip("0").rstrip(".")
 
 
 # ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # إشعار للأدمن عند دخول مستخدم (مرة واحدة لكل تشغيل)
     admin_id = _get_admin_id()
     user = update.effective_user
     if admin_id and user and user.id not in NOTIFIED_USERS:
@@ -182,16 +190,16 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_val = amount / FACTOR
         reply = (
             "💱 ✅ نتيجة التحويل\n\n"
-            f"• المبلغ القديم: {fmt_number(old_val)}\n"
-            f"• المبلغ الجديد: {fmt_number(new_val)}"
+            f"• المبلغ القديم: {fmt_number(old_val)} ليرة\n"
+            f"• المبلغ الجديد: {fmt_number(new_val)} ليرة"
         )
     else:
         new_val = amount
         old_val = amount * FACTOR
         reply = (
             "💱 ✅ نتيجة التحويل\n\n"
-            f"• المبلغ الجديد: {fmt_number(new_val)}\n"
-            f"• المبلغ القديم: {fmt_number(old_val)}"
+            f"• المبلغ الجديد: {fmt_number(new_val)} ليرة\n"
+            f"• المبلغ القديم: {fmt_number(old_val)} ليرة"
         )
 
     await update.effective_message.reply_text(reply, reply_markup=back_menu())
