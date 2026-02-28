@@ -13,11 +13,10 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID_RAW = os.getenv("ADMIN_ID")  # ضعه في Variables على Railway
-FACTOR = Decimal("100")  # حذف صفرين
-MODE_KEY = "mode"        # old_to_new | new_to_old
+ADMIN_ID_RAW = os.getenv("ADMIN_ID")
+FACTOR = Decimal("100")
+MODE_KEY = "mode"
 
-# إشعار دخول المستخدم (مرة واحدة لكل تشغيل للبوت)
 NOTIFIED_USERS = set()
 
 
@@ -57,16 +56,9 @@ WELCOME_TEXT = (
 
 HELP_TEXT = (
     "🇸🇾 شرح سريع – تحويل الليرة السورية\n\n"
-    "تم حذف صفرين من الليرة السورية، أي أن:\n"
     "100 ليرة قديمة = 1 ليرة جديدة\n\n"
-    "طريقة التحويل:\n\n"
-    "🔁 من قديم إلى جديد\n"
-    "قسمة المبلغ على 100\n"
-    "مثال: 50,000 قديم = 500 جديد\n\n"
-    "🔁 من جديد إلى قديم\n"
-    "ضرب المبلغ × 100\n"
-    "مثال: 500 جديد = 50,000 قديم\n\n"
-    "اختر نوع التحويل من الأزرار ثم اكتب المبلغ ليتم الحساب مباشرة."
+    "🔁 من قديم إلى جديد → قسمة على 100\n"
+    "🔁 من جديد إلى قديم → ضرب × 100"
 )
 
 
@@ -76,11 +68,7 @@ _EASTERN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
 
 def normalize_amount(text: str) -> Decimal:
-    """
-    يقبل مثل: 125000 / 125,000 / ١٢٥٠٠٠ / 125000 ليرة
-    ويرجع Decimal.
-    """
-    t = (text or "").strip()
+    t = (text or "").strip().lower()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
 
     m = re.search(r"[-+]?\d[\d,\s]*([.]\d+)?", t)
@@ -88,26 +76,41 @@ def normalize_amount(text: str) -> Decimal:
         raise ValueError("No number found")
 
     num = m.group(0).replace(" ", "").replace(",", "")
-    return Decimal(num)
+    value = Decimal(num)
+
+    if "مليار" in t:
+        value *= Decimal("1000000000")
+    elif "مليون" in t:
+        value *= Decimal("1000000")
+    elif "الف" in t or "ألف" in t:
+        value *= Decimal("1000")
+
+    return value
 
 
-# ✅ التعديل الوحيد هنا
+# ✅ التعديل المصحح هنا فقط
 def fmt_number(d: Decimal) -> str:
     d = d.normalize()
+    sign = "-" if d < 0 else ""
+    d = abs(d)
 
-    if d == d.to_integral_value():
-        n = int(d)
+    def _trim(x: Decimal) -> str:
+        s = format(x.normalize(), "f").rstrip("0").rstrip(".")
+        return s if s else "0"
 
-        if n >= 1_000_000_000:
-            return f"{n // 1_000_000_000} مليار"
-        elif n >= 1_000_000:
-            return f"{n // 1_000_000} مليون"
-        elif n >= 1_000:
-            return f"{n // 1_000} ألف"
-        else:
-            return str(n)
+    if d < 1000:
+        return sign + _trim(d)
 
-    return format(d, "f").rstrip("0").rstrip(".")
+    if d < 1_000_000:
+        v = d / Decimal("1000")
+        return sign + _trim(v) + " ألف"
+
+    if d < 1_000_000_000:
+        v = d / Decimal("1000000")
+        return sign + _trim(v) + " مليون"
+
+    v = d / Decimal("1000000000")
+    return sign + _trim(v) + " مليار"
 
 
 # ================= Handlers =================
@@ -176,7 +179,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = normalize_amount(update.effective_message.text)
     except Exception:
         await update.effective_message.reply_text(
-            "❌ ما قدرت أفهم الرقم.\nاكتب رقم فقط مثل: 125000 أو 125,000",
+            "❌ ما قدرت أفهم الرقم.",
             reply_markup=back_menu(),
         )
         return
