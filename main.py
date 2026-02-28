@@ -17,7 +17,6 @@ ADMIN_ID_RAW = os.getenv("ADMIN_ID")  # ضعه في Variables على Railway
 FACTOR = Decimal("100")  # حذف صفرين
 MODE_KEY = "mode"        # old_to_new | new_to_old
 
-# إشعار دخول المستخدم (مرة واحدة لكل تشغيل للبوت)
 NOTIFIED_USERS = set()
 
 
@@ -59,14 +58,8 @@ HELP_TEXT = (
     "🇸🇾 شرح سريع – تحويل الليرة السورية\n\n"
     "تم حذف صفرين من الليرة السورية، أي أن:\n"
     "100 ليرة قديمة = 1 ليرة جديدة\n\n"
-    "طريقة التحويل:\n\n"
-    "🔁 من قديم إلى جديد\n"
-    "قسمة المبلغ على 100\n"
-    "مثال: 50,000 قديم = 500 جديد\n\n"
-    "🔁 من جديد إلى قديم\n"
-    "ضرب المبلغ × 100\n"
-    "مثال: 500 جديد = 50,000 قديم\n\n"
-    "اختر نوع التحويل من الأزرار ثم اكتب المبلغ ليتم الحساب مباشرة."
+    "🔁 من قديم إلى جديد → قسمة على 100\n"
+    "🔁 من جديد إلى قديم → ضرب × 100"
 )
 
 
@@ -76,10 +69,6 @@ _EASTERN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
 
 def normalize_amount(text: str) -> Decimal:
-    """
-    يقبل مثل: 125000 / 125,000 / ١٢٥٠٠٠ / 125000 ليرة
-    ويرجع Decimal.
-    """
     t = (text or "").strip()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
 
@@ -91,29 +80,32 @@ def normalize_amount(text: str) -> Decimal:
     return Decimal(num)
 
 
-# ✅ التعديل الوحيد هنا (حل نهائي بدون ضياع أصفار)
+# ✅ التعديل الوحيد هنا (إصلاح عرض الألف/المليون بدون قص الكسور)
 def fmt_number(d: Decimal) -> str:
     d = d.normalize()
 
-    # الرقم الكامل بدون فواصل
     if d == d.to_integral_value():
-        full = str(int(d))
-    else:
-        full = format(d, "f").rstrip("0").rstrip(".")
+        n = int(d)
 
-    # إذا أقل من 10000 خليه كما هو
-    if d < Decimal("10000"):
-        return full
+        if n < 10_000:
+            return str(n)
 
-    # صيغة مختصرة بدون قص الكسور
-    if d >= Decimal("1000000000"):
-        short = format((d / Decimal("1000000000")).normalize(), "f").rstrip("0").rstrip(".") + " مليار"
-    elif d >= Decimal("1000000"):
-        short = format((d / Decimal("1000000")).normalize(), "f").rstrip("0").rstrip(".") + " مليون"
-    else:
-        short = format((d / Decimal("1000")).normalize(), "f").rstrip("0").rstrip(".") + " ألف"
+        if n >= 1_000_000_000:
+            value = Decimal(n) / Decimal("1000000000")
+            return format(value, "f").rstrip("0").rstrip(".") + " مليار"
 
-    return f"{full} ({short})"
+        elif n >= 1_000_000:
+            value = Decimal(n) / Decimal("1000000")
+            return format(value, "f").rstrip("0").rstrip(".") + " مليون"
+
+        elif n >= 1_000:
+            value = Decimal(n) / Decimal("1000")
+            return format(value, "f").rstrip("0").rstrip(".") + " ألف"
+
+        else:
+            return str(n)
+
+    return format(d, "f").rstrip("0").rstrip(".")
 
 
 # ================= Handlers =================
