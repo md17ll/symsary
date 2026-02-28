@@ -58,7 +58,8 @@ HELP_TEXT = (
     "🇸🇾 شرح سريع – تحويل الليرة السورية\n\n"
     "100 ليرة قديمة = 1 ليرة جديدة\n\n"
     "🔁 من قديم إلى جديد → قسمة على 100\n"
-    "🔁 من جديد إلى قديم → ضرب × 100"
+    "🔁 من جديد إلى قديم → ضرب × 100\n\n"
+    "✅ تقدر تكتب كمان: 150 الف / 2 مليون / 3 مليار"
 )
 
 
@@ -68,6 +69,11 @@ _EASTERN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
 
 def normalize_amount(text: str) -> Decimal:
+    """
+    يقبل مثل:
+    125000 / 125,000 / ١٢٥٠٠٠ / 150 الف / 2 مليون / 3 مليار
+    ويرجع Decimal.
+    """
     t = (text or "").strip().lower()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
 
@@ -88,8 +94,13 @@ def normalize_amount(text: str) -> Decimal:
     return value
 
 
-# ================= تنسيق الأرقام النهائي =================
 def fmt_number(d: Decimal) -> str:
+    """
+    عرض الأرقام:
+    - أقل من 10,000: يعرض رقم كامل (مثال: 1500)
+    - من 10,000 إلى أقل من مليون: ألف (مثال: 150 ألف)
+    - مليون/مليار بنفس الفكرة
+    """
     d = d.normalize()
     sign = "-" if d < 0 else ""
     d = abs(d)
@@ -98,23 +109,19 @@ def fmt_number(d: Decimal) -> str:
         s = format(x.normalize(), "f").rstrip("0").rstrip(".")
         return s if s else "0"
 
-    # أقل من 10 آلاف → عرض كامل (مثال: 1500)
     if d < Decimal("10000"):
         if d == d.to_integral_value():
             return sign + str(int(d))
         return sign + clean(d)
 
-    # من 10 آلاف إلى أقل من مليون → ألف
     if d < Decimal("1000000"):
-        v = d / Decimal("1000")
+        v = d / Decimal("1000")  # ✅ 1000 بالضبط
         return sign + clean(v) + " ألف"
 
-    # مليون
     if d < Decimal("1000000000"):
         v = d / Decimal("1000000")
         return sign + clean(v) + " مليون"
 
-    # مليار
     v = d / Decimal("1000000000")
     return sign + clean(v) + " مليار"
 
@@ -190,6 +197,13 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("❌ اكتب مبلغ موجب.", reply_markup=back_menu())
         return
 
+    # تنبيه بسيط لتجنب الالتباس (لا يغير الحساب)
+    warn = ""
+    if mode == "old_to_new" and amount < Decimal("1000"):
+        warn = "\n\n⚠️ تنبيه: إذا قصدك (ألف/عشرات الألوف) تأكد ما ناقص أصفار."
+    if mode == "new_to_old" and amount < Decimal("10"):
+        warn = "\n\n⚠️ تنبيه: يبدو المبلغ صغير جداً، تأكد من الرقم."
+
     if mode == "old_to_new":
         old_val = amount
         new_val = amount / FACTOR
@@ -197,6 +211,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💱 ✅ نتيجة التحويل\n\n"
             f"• المبلغ القديم: {fmt_number(old_val)} ليرة\n"
             f"• المبلغ الجديد: {fmt_number(new_val)} ليرة"
+            f"{warn}"
         )
     else:
         new_val = amount
@@ -205,6 +220,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💱 ✅ نتيجة التحويل\n\n"
             f"• المبلغ الجديد: {fmt_number(new_val)} ليرة\n"
             f"• المبلغ القديم: {fmt_number(old_val)} ليرة"
+            f"{warn}"
         )
 
     await update.effective_message.reply_text(reply, reply_markup=back_menu())
