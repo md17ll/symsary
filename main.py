@@ -13,11 +13,10 @@ from telegram.ext import (
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID_RAW = os.getenv("ADMIN_ID")  # ضعه في Variables على Railway
+ADMIN_ID_RAW = os.getenv("ADMIN_ID")
 FACTOR = Decimal("100")  # حذف صفرين
-MODE_KEY = "mode"        # old_to_new | new_to_old
+MODE_KEY = "mode"
 
-# إشعار دخول المستخدم (مرة واحدة لكل تشغيل للبوت)
 NOTIFIED_USERS = set()
 
 
@@ -57,16 +56,9 @@ WELCOME_TEXT = (
 
 HELP_TEXT = (
     "🇸🇾 شرح سريع – تحويل الليرة السورية\n\n"
-    "تم حذف صفرين من الليرة السورية، أي أن:\n"
     "100 ليرة قديمة = 1 ليرة جديدة\n\n"
-    "طريقة التحويل:\n\n"
-    "🔁 من قديم إلى جديد\n"
-    "قسمة المبلغ على 100\n"
-    "مثال: 50,000 قديم = 500 جديد\n\n"
-    "🔁 من جديد إلى قديم\n"
-    "ضرب المبلغ × 100\n"
-    "مثال: 500 جديد = 50,000 قديم\n\n"
-    "اختر نوع التحويل من الأزرار ثم اكتب المبلغ ليتم الحساب مباشرة."
+    "🔁 من قديم إلى جديد → قسمة على 100\n"
+    "🔁 من جديد إلى قديم → ضرب × 100"
 )
 
 
@@ -76,11 +68,6 @@ _EASTERN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
 
 def normalize_amount(text: str) -> Decimal:
-    """
-    يقبل مثل:
-    125000 / 125,000 / ١٢٥٠٠٠ / 150 الف / 2 مليون / 3 مليار
-    ويرجع Decimal.
-    """
     t = (text or "").strip().lower()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
 
@@ -101,38 +88,39 @@ def normalize_amount(text: str) -> Decimal:
     return value
 
 
-# ✅ التعديل الوحيد هنا: عرض 1500 كـ 1500، وتصحيح 150000 -> 150 ألف
+# ================= تنسيق الأرقام النهائي =================
 def fmt_number(d: Decimal) -> str:
     d = d.normalize()
     sign = "-" if d < 0 else ""
     d = abs(d)
 
-    def _trim(x: Decimal) -> str:
+    def clean(x: Decimal) -> str:
         s = format(x.normalize(), "f").rstrip("0").rstrip(".")
         return s if s else "0"
 
-    # الأرقام الصغيرة (مثل 1500 جديد) تطلع كاملة بدون "ألف"
+    # أقل من 10 آلاف → عرض كامل (مثال: 1500)
     if d < Decimal("10000"):
         if d == d.to_integral_value():
             return sign + str(int(d))
-        return sign + _trim(d)
+        return sign + clean(d)
 
-    # من 10,000 وفوق نستخدم ألف/مليون/مليار
+    # من 10 آلاف إلى أقل من مليون → ألف
     if d < Decimal("1000000"):
         v = d / Decimal("1000")
-        return sign + _trim(v) + " ألف"
+        return sign + clean(v) + " ألف"
 
+    # مليون
     if d < Decimal("1000000000"):
         v = d / Decimal("1000000")
-        return sign + _trim(v) + " مليون"
+        return sign + clean(v) + " مليون"
 
+    # مليار
     v = d / Decimal("1000000000")
-    return sign + _trim(v) + " مليار"
+    return sign + clean(v) + " مليار"
 
 
 # ================= Handlers =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # إشعار للأدمن عند دخول مستخدم (مرة واحدة لكل تشغيل)
     admin_id = _get_admin_id()
     user = update.effective_user
     if admin_id and user and user.id not in NOTIFIED_USERS:
@@ -170,9 +158,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "new_to_old":
         context.user_data[MODE_KEY] = "new_to_old"
         await q.edit_message_text(
-            "🧮 تحويل من جديد إلى قديم\n"
-            "اكتب المبلغ بالعملة الجديدة الآن:\n"
-            "مثال: 1250",
+            "🧮 تحويل من جديد إلى قديم\nاكتب المبلغ بالعملة الجديدة الآن:\nمثال: 1250",
             reply_markup=back_menu(),
         )
         return
@@ -180,9 +166,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "old_to_new":
         context.user_data[MODE_KEY] = "old_to_new"
         await q.edit_message_text(
-            "🧮 تحويل من قديم إلى جديد\n"
-            "اكتب المبلغ بالعملة القديمة الآن:\n"
-            "مثال: 125000",
+            "🧮 تحويل من قديم إلى جديد\nاكتب المبلغ بالعملة القديمة الآن:\nمثال: 125000",
             reply_markup=back_menu(),
         )
         return
@@ -197,13 +181,13 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amount = normalize_amount(update.effective_message.text)
     except Exception:
         await update.effective_message.reply_text(
-            "❌ ما قدرت أفهم الرقم.\nاكتب رقم فقط مثل: 125000 أو 150 الف",
+            "❌ اكتب رقم صحيح مثل: 125000 أو 150 الف",
             reply_markup=back_menu(),
         )
         return
 
     if amount < 0:
-        await update.effective_message.reply_text("❌ رجاءً اكتب مبلغ موجب.", reply_markup=back_menu())
+        await update.effective_message.reply_text("❌ اكتب مبلغ موجب.", reply_markup=back_menu())
         return
 
     if mode == "old_to_new":
@@ -226,7 +210,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(reply, reply_markup=back_menu())
 
 
-# ================= تشغيل =================
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Missing BOT_TOKEN environment variable")
