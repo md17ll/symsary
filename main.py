@@ -91,12 +91,16 @@ def normalize_amount(text: str) -> Decimal:
     return Decimal(num)
 
 
-# ✅ التعديل الوحيد هنا
+# ✅ التعديل الوحيد هنا (منع 1500 تصير 1 ألف)
 def fmt_number(d: Decimal) -> str:
     d = d.normalize()
 
     if d == d.to_integral_value():
         n = int(d)
+
+        # ✅ الأرقام الصغيرة تعرض كاملة (مثل 1500)
+        if n < 10_000:
+            return str(n)
 
         if n >= 1_000_000_000:
             return f"{n // 1_000_000_000} مليار"
