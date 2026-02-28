@@ -17,7 +17,6 @@ ADMIN_ID_RAW = os.getenv("ADMIN_ID")  # ضعه في Variables على Railway
 FACTOR = Decimal("100")  # حذف صفرين
 MODE_KEY = "mode"        # old_to_new | new_to_old
 
-# إشعار دخول المستخدم (مرة واحدة لكل تشغيل للبوت)
 NOTIFIED_USERS = set()
 
 
@@ -59,14 +58,8 @@ HELP_TEXT = (
     "🇸🇾 شرح سريع – تحويل الليرة السورية\n\n"
     "تم حذف صفرين من الليرة السورية، أي أن:\n"
     "100 ليرة قديمة = 1 ليرة جديدة\n\n"
-    "طريقة التحويل:\n\n"
-    "🔁 من قديم إلى جديد\n"
-    "قسمة المبلغ على 100\n"
-    "مثال: 50,000 قديم = 500 جديد\n\n"
-    "🔁 من جديد إلى قديم\n"
-    "ضرب المبلغ × 100\n"
-    "مثال: 500 جديد = 50,000 قديم\n\n"
-    "اختر نوع التحويل من الأزرار ثم اكتب المبلغ ليتم الحساب مباشرة."
+    "🔁 من قديم إلى جديد → قسمة على 100\n"
+    "🔁 من جديد إلى قديم → ضرب × 100"
 )
 
 
@@ -76,10 +69,6 @@ _EASTERN_ARABIC_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
 
 
 def normalize_amount(text: str) -> Decimal:
-    """
-    يقبل مثل: 125000 / 125,000 / ١٢٥٠٠٠ / 125000 ليرة
-    ويرجع Decimal.
-    """
     t = (text or "").strip()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
 
@@ -91,23 +80,28 @@ def normalize_amount(text: str) -> Decimal:
     return Decimal(num)
 
 
-# ✅ التعديل الوحيد هنا (منع 1500 تصير 1 ألف)
+# ✅ التعديل الوحيد هنا (إصلاح عرض الألف/المليون بدون قص الكسور)
 def fmt_number(d: Decimal) -> str:
     d = d.normalize()
 
     if d == d.to_integral_value():
         n = int(d)
 
-        # ✅ الأرقام الصغيرة تعرض كاملة (مثل 1500)
         if n < 10_000:
             return str(n)
 
         if n >= 1_000_000_000:
-            return f"{n // 1_000_000_000} مليار"
+            value = Decimal(n) / Decimal("1000000000")
+            return format(value, "f").rstrip("0").rstrip(".") + " مليار"
+
         elif n >= 1_000_000:
-            return f"{n // 1_000_000} مليون"
+            value = Decimal(n) / Decimal("1000000")
+            return format(value, "f").rstrip("0").rstrip(".") + " مليون"
+
         elif n >= 1_000:
-            return f"{n // 1_000} ألف"
+            value = Decimal(n) / Decimal("1000")
+            return format(value, "f").rstrip("0").rstrip(".") + " ألف"
+
         else:
             return str(n)
 
@@ -209,7 +203,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(reply, reply_markup=back_menu())
 
 
-# ================= تشغيل =================
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("Missing BOT_TOKEN environment variable")
