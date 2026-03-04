@@ -91,29 +91,12 @@ def normalize_amount(text: str) -> Decimal:
     return Decimal(num)
 
 
-# ✅ التعديل الوحيد هنا (حل نهائي بدون ضياع أصفار)
+# ✅ التعديل الوحيد هنا: إلغاء ألف/مليون/مليار وإظهار الرقم فقط
 def fmt_number(d: Decimal) -> str:
     d = d.normalize()
-
-    # الرقم الكامل بدون فواصل
     if d == d.to_integral_value():
-        full = str(int(d))
-    else:
-        full = format(d, "f").rstrip("0").rstrip(".")
-
-    # إذا أقل من 10000 خليه كما هو
-    if d < Decimal("10000"):
-        return full
-
-    # صيغة مختصرة بدون قص الكسور
-    if d >= Decimal("1000000000"):
-        short = format((d / Decimal("1000000000")).normalize(), "f").rstrip("0").rstrip(".") + " مليار"
-    elif d >= Decimal("1000000"):
-        short = format((d / Decimal("1000000")).normalize(), "f").rstrip("0").rstrip(".") + " مليون"
-    else:
-        short = format((d / Decimal("1000")).normalize(), "f").rstrip("0").rstrip(".") + " ألف"
-
-    return f"{full} ({short})"
+        return str(int(d))
+    return format(d, "f").rstrip("0").rstrip(".")
 
 
 # ================= Handlers =================
@@ -196,16 +179,16 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_val = amount / FACTOR
         reply = (
             "💱 ✅ نتيجة التحويل\n\n"
-            f"• المبلغ القديم: {fmt_number(old_val)} ليرة\n"
-            f"• المبلغ الجديد: {fmt_number(new_val)} ليرة"
+            f"• المبلغ القديم: {fmt_number(old_val)} عملة قديمة\n"
+            f"• المبلغ الجديد: {fmt_number(new_val)} عملة جديدة"
         )
     else:
         new_val = amount
         old_val = amount * FACTOR
         reply = (
             "💱 ✅ نتيجة التحويل\n\n"
-            f"• المبلغ الجديد: {fmt_number(new_val)} ليرة\n"
-            f"• المبلغ القديم: {fmt_number(old_val)} ليرة"
+            f"• المبلغ الجديد: {fmt_number(new_val)} عملة جديدة\n"
+            f"• المبلغ القديم: {fmt_number(old_val)} عملة قديمة"
         )
 
     await update.effective_message.reply_text(reply, reply_markup=back_menu())
