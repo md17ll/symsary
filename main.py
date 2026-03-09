@@ -41,7 +41,8 @@ ADMIN_WAIT_BROADCAST = "admin_wait_broadcast"
 ADMIN_WAIT_REWARD_POINTS = "admin_wait_reward_points"
 ADMIN_WAIT_ADD_ITEM_NAME = "admin_wait_add_item_name"
 ADMIN_WAIT_ADD_ITEM_COST = "admin_wait_add_item_cost"
-ADMIN_WAIT_DELETE_ITEM = "admin_wait_delete_item"
+ADMIN_WAIT_EDIT_ITEM_NAME = "admin_wait_edit_item_name"
+ADMIN_WAIT_EDIT_ITEM_COST = "admin_wait_edit_item_cost"
 
 REF_WAIT_REDEEM = "ref_wait_redeem"
 
@@ -227,13 +228,61 @@ def get_bot_username(context: ContextTypes.DEFAULT_TYPE) -> str:
     return "YourBot"
 
 
+def get_leaderboard(limit: int = 10) -> list[dict]:
+    users_data = load_users()
+    results = []
+    for user in users_data.get("users", {}).values():
+        referrals_count = len(user.get("referrals", []))
+        if referrals_count <= 0:
+            continue
+        name = (user.get("full_name") or "").strip() or "مستخدم"
+        results.append(
+            {
+                "name": name,
+                "referrals_count": referrals_count,
+            }
+        )
+
+    results.sort(key=lambda x: x["referrals_count"], reverse=True)
+    return results[:limit]
+
+
+def find_reward_by_id(item_id: int):
+    rewards = load_rewards()
+    for item in rewards.get("items", []):
+        if int(item.get("id", 0)) == int(item_id):
+            return item
+    return None
+
+
+def get_next_reward_id(items: list[dict]) -> int:
+    if not items:
+        return 1
+    return max(int(item.get("id", 0)) for item in items) + 1
+
+
+def build_rewards_buttons(prefix: str, items: list[dict], include_back_to: str):
+    rows = []
+    for item in items:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{item['name']} — {item['cost']} نقطة",
+                    callback_data=f"{prefix}:{item['id']}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=include_back_to)])
+    return InlineKeyboardMarkup(rows)
+
+
 # ================= واجهة القوائم =================
 def main_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("💰 تحويل قديم → جديد", callback_data="old_to_new")],
+        [InlineKeyboardButton("🎁 نظام الإحالة", callback_data="referral_menu")],
         [
+            InlineKeyboardButton("💰 تحويل قديم → جديد", callback_data="old_to_new"),
             InlineKeyboardButton("💵 تحويل جديد → قديم", callback_data="new_to_old"),
-            InlineKeyboardButton("🎁 نظام الإحالة", callback_data="referral_menu"),
         ],
         [InlineKeyboardButton("ℹ️ شرح سريع", callback_data="quick_help")],
     ]
@@ -256,6 +305,7 @@ def referral_menu() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("👥 إحالاتي", callback_data="my_referrals")],
             [InlineKeyboardButton("🔗 رابط الإحالة", callback_data="my_ref_link")],
+            [InlineKeyboardButton("🏆 المتصدرين", callback_data="ref_leaderboard")],
             [InlineKeyboardButton("🎁 استبدال النقاط", callback_data="redeem_points")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
         ]
@@ -280,9 +330,19 @@ def admin_rewards_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("➕ إضافة سلعة", callback_data="admin_add_reward")],
-            [InlineKeyboardButton("❌ حذف سلعة", callback_data="admin_delete_reward")],
             [InlineKeyboardButton("📦 عرض السلع", callback_data="admin_list_rewards")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="admin_menu")],
+        ]
+    )
+
+
+def selected_reward_menu(item_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✏️ تعديل الاسم", callback_data=f"admin_edit_reward_name:{item_id}")],
+            [InlineKeyboardButton("💰 تعديل السعر", callback_data=f"admin_edit_reward_cost:{item_id}")],
+            [InlineKeyboardButton("❌ حذف السلعة", callback_data=f"admin_delete_reward:{item_id}")],
+            [InlineKeyboardButton("🔙 رجوع", callback_data="admin_list_rewards")],
         ]
     )
 
@@ -363,6 +423,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(MODE_KEY, None)
     context.user_data.pop(ADMIN_ACTION_KEY, None)
     context.user_data.pop(REFERRAL_ACTION_KEY, None)
+    context.user_data.pop("new_reward_name", None)
+    context.user_data.pop("selected_reward_id", None)
 
     await update.effective_message.reply_text(
         WELCOME_TEXT,
@@ -382,19 +444,24 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(BLOCKED_TEXT)
         return
 
-    context.user_data.pop(ADMIN_ACTION_KEY, None)
-    context.user_data.pop(REFERRAL_ACTION_KEY, None)
-
     if q.data == "back":
         context.user_data.pop(MODE_KEY, None)
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+        context.user_data.pop(REFERRAL_ACTION_KEY, None)
+        context.user_data.pop("new_reward_name", None)
+        context.user_data.pop("selected_reward_id", None)
         await q.edit_message_text(WELCOME_TEXT, reply_markup=main_menu(user.id))
         return
 
     if q.data == "quick_help":
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         await q.edit_message_text(HELP_TEXT, reply_markup=back_menu(user.id))
         return
 
     if q.data == "new_to_old":
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         context.user_data[MODE_KEY] = "new_to_old"
         await q.edit_message_text(
             "🧮 تحويل جديد → قديم\n"
@@ -405,6 +472,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if q.data == "old_to_new":
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         context.user_data[MODE_KEY] = "old_to_new"
         await q.edit_message_text(
             "🧮 تحويل قديم → جديد\n"
@@ -416,6 +485,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ================= نظام الإحالة =================
     if q.data == "referral_menu":
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         await q.edit_message_text(
             "🎁 نظام الإحالة\n\nاختر القسم الذي تريده:",
             reply_markup=referral_menu(),
@@ -445,6 +516,21 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if q.data == "ref_leaderboard":
+        leaders = get_leaderboard(limit=10)
+        if not leaders:
+            text = "🏆 المتصدرين\n\nلا يوجد متصدرون حالياً."
+        else:
+            lines = ["🏆 المتصدرين\n"]
+            medals = ["1️⃣", "2️⃣", "3️⃣"]
+            for idx, leader in enumerate(leaders, start=1):
+                marker = medals[idx - 1] if idx <= 3 else f"{idx}."
+                lines.append(f"{marker} {leader['name']} — {leader['referrals_count']} إحالة")
+            text = "\n".join(lines)
+
+        await q.edit_message_text(text, reply_markup=referral_menu())
+        return
+
     if q.data == "redeem_points":
         rewards = load_rewards().get("items", [])
         if not rewards:
@@ -454,15 +540,76 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        text_lines = ["🎁 السلع المتاحة للاستبدال\n"]
-        for item in rewards:
-            text_lines.append(f"• {item['name']} — {item['cost']} نقطة")
+        context.user_data.pop(REFERRAL_ACTION_KEY, None)
+        await q.edit_message_text(
+            "🎁 استبدال النقاط\n\nاختر الجائزة التي تريد استبدالها:",
+            reply_markup=build_rewards_buttons(
+                prefix="redeem_reward",
+                items=rewards,
+                include_back_to="referral_menu",
+            ),
+        )
+        return
 
-        text_lines.append("\n✍️ أرسل اسم السلعة التي تريد استبدالها.")
-        context.user_data[REFERRAL_ACTION_KEY] = REF_WAIT_REDEEM
+    if q.data.startswith("redeem_reward:"):
+        try:
+            item_id = int(q.data.split(":", 1)[1])
+        except Exception:
+            await q.edit_message_text("❌ حدث خطأ في اختيار السلعة.", reply_markup=referral_menu())
+            return
+
+        selected_item = find_reward_by_id(item_id)
+        if not selected_item:
+            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=referral_menu())
+            return
+
+        users_data = load_users()
+        uid = str(user.id)
+        user_data = users_data["users"].get(uid)
+        if not user_data:
+            ensure_user_exists(user)
+            users_data = load_users()
+            user_data = users_data["users"].get(uid)
+
+        current_points = int(user_data.get("points", 0))
+        cost = int(selected_item["cost"])
+
+        if current_points < cost:
+            await q.edit_message_text(
+                "❌ نقاطك غير كافية لهذا الاستبدال.",
+                reply_markup=build_rewards_buttons(
+                    prefix="redeem_reward",
+                    items=load_rewards().get("items", []),
+                    include_back_to="referral_menu",
+                ),
+            )
+            return
+
+        user_data["points"] = current_points - cost
+        user_data["redeem_count"] = int(user_data.get("redeem_count", 0)) + 1
+        save_users(users_data)
+
+        admin_id = _get_admin_id()
+        if admin_id:
+            username = f"@{user.username}" if user.username else "بدون"
+            full_name = user.full_name or "بدون"
+            admin_msg = (
+                "🚨 طلب استبدال جديد\n\n"
+                f"👤 الاسم: {full_name}\n"
+                f"🆔 ID: {user.id}\n"
+                f"🔗 Username: {username}\n"
+                f"🎁 السلعة: {selected_item['name']}\n"
+                f"⭐ التكلفة: {cost} نقطة"
+            )
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=admin_msg)
+            except Exception:
+                pass
 
         await q.edit_message_text(
-            "\n".join(text_lines),
+            "✅ تم إرسال طلب الاستبدال إلى الأدمن بنجاح.\n"
+            f"🎁 السلعة: {selected_item['name']}\n"
+            f"⭐ تم خصم: {cost} نقطة",
             reply_markup=referral_menu(),
         )
         return
@@ -471,6 +618,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_menu":
         if not is_admin(user.id):
             return
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+        context.user_data.pop(REFERRAL_ACTION_KEY, None)
+        context.user_data.pop("new_reward_name", None)
+        context.user_data.pop("selected_reward_id", None)
         await q.edit_message_text(
             "⚙️ لوحة الأدمن\n\nاختر العملية التي تريدها:",
             reply_markup=admin_menu(),
@@ -538,6 +689,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_manage_rewards":
         if not is_admin(user.id):
             return
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+        context.user_data.pop("new_reward_name", None)
+        context.user_data.pop("selected_reward_id", None)
         await q.edit_message_text(
             "🎁 إدارة الاستبدال\n\nاختر العملية التي تريدها:",
             reply_markup=admin_rewards_menu(),
@@ -547,32 +701,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_add_reward":
         if not is_admin(user.id):
             return
+        context.user_data.pop("selected_reward_id", None)
         context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_ADD_ITEM_NAME
         await q.edit_message_text(
             "➕ إضافة سلعة\n\nأرسل الآن اسم السلعة الجديدة.",
-            reply_markup=admin_rewards_menu(),
-        )
-        return
-
-    if q.data == "admin_delete_reward":
-        if not is_admin(user.id):
-            return
-        rewards = load_rewards().get("items", [])
-        if not rewards:
-            await q.edit_message_text(
-                "❌ حذف سلعة\n\nلا توجد سلع حالياً.",
-                reply_markup=admin_rewards_menu(),
-            )
-            return
-
-        lines = ["❌ حذف سلعة\n", "السلع الحالية:"]
-        for item in rewards:
-            lines.append(f"• {item['name']} — {item['cost']} نقطة")
-        lines.append("\n✍️ أرسل اسم السلعة التي تريد حذفها.")
-
-        context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_DELETE_ITEM
-        await q.edit_message_text(
-            "\n".join(lines),
             reply_markup=admin_rewards_menu(),
         )
         return
@@ -582,14 +714,121 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         rewards = load_rewards().get("items", [])
         if not rewards:
-            text = "📦 عرض السلع\n\nلا توجد سلع حالياً."
-        else:
-            lines = ["📦 السلع الحالية\n"]
-            for item in rewards:
-                lines.append(f"• {item['name']} — {item['cost']} نقطة")
-            text = "\n".join(lines)
+            await q.edit_message_text(
+                "📦 عرض السلع\n\nلا توجد سلع حالياً.",
+                reply_markup=admin_rewards_menu(),
+            )
+            return
 
-        await q.edit_message_text(text, reply_markup=admin_rewards_menu())
+        await q.edit_message_text(
+            "📦 السلع الحالية\n\nاضغط على السلعة التي تريد إدارتها:",
+            reply_markup=build_rewards_buttons(
+                prefix="admin_select_reward",
+                items=rewards,
+                include_back_to="admin_manage_rewards",
+            ),
+        )
+        return
+
+    if q.data.startswith("admin_select_reward:"):
+        if not is_admin(user.id):
+            return
+        try:
+            item_id = int(q.data.split(":", 1)[1])
+        except Exception:
+            await q.edit_message_text("❌ حدث خطأ في اختيار السلعة.", reply_markup=admin_rewards_menu())
+            return
+
+        item = find_reward_by_id(item_id)
+        if not item:
+            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+            return
+
+        context.user_data["selected_reward_id"] = item_id
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+
+        await q.edit_message_text(
+            f"🎁 {item['name']}\n\nالسعر: {item['cost']} نقطة",
+            reply_markup=selected_reward_menu(item_id),
+        )
+        return
+
+    if q.data.startswith("admin_edit_reward_name:"):
+        if not is_admin(user.id):
+            return
+        try:
+            item_id = int(q.data.split(":", 1)[1])
+        except Exception:
+            return
+
+        item = find_reward_by_id(item_id)
+        if not item:
+            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+            return
+
+        context.user_data["selected_reward_id"] = item_id
+        context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_EDIT_ITEM_NAME
+
+        await q.edit_message_text(
+            f"✏️ تعديل اسم السلعة\n\nالاسم الحالي: {item['name']}\n\nأرسل الآن الاسم الجديد.",
+            reply_markup=selected_reward_menu(item_id),
+        )
+        return
+
+    if q.data.startswith("admin_edit_reward_cost:"):
+        if not is_admin(user.id):
+            return
+        try:
+            item_id = int(q.data.split(":", 1)[1])
+        except Exception:
+            return
+
+        item = find_reward_by_id(item_id)
+        if not item:
+            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+            return
+
+        context.user_data["selected_reward_id"] = item_id
+        context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_EDIT_ITEM_COST
+
+        await q.edit_message_text(
+            f"💰 تعديل سعر السلعة\n\nالسلعة: {item['name']}\nالسعر الحالي: {item['cost']} نقطة\n\nأرسل الآن السعر الجديد.",
+            reply_markup=selected_reward_menu(item_id),
+        )
+        return
+
+    if q.data.startswith("admin_delete_reward:"):
+        if not is_admin(user.id):
+            return
+        try:
+            item_id = int(q.data.split(":", 1)[1])
+        except Exception:
+            return
+
+        rewards = load_rewards()
+        items = rewards.get("items", [])
+        item = None
+        new_items = []
+
+        for entry in items:
+            if int(entry.get("id", 0)) == item_id:
+                item = entry
+            else:
+                new_items.append(entry)
+
+        if not item:
+            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+            return
+
+        rewards["items"] = new_items
+        save_rewards(rewards)
+        context.user_data.pop("selected_reward_id", None)
+        context.user_data.pop(ADMIN_ACTION_KEY, None)
+
+        await q.edit_message_text(
+            f"✅ تم حذف السلعة: {item['name']}",
+            reply_markup=admin_rewards_menu(),
+        )
         return
 
 
@@ -722,15 +961,13 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 rewards = load_rewards()
                 items = rewards.get("items", [])
 
-                replaced = False
-                for item in items:
-                    if item["name"].strip().lower() == item_name.lower():
-                        item["cost"] = cost
-                        replaced = True
-                        break
-
-                if not replaced:
-                    items.append({"name": item_name, "cost": cost})
+                items.append(
+                    {
+                        "id": get_next_reward_id(items),
+                        "name": item_name,
+                        "cost": cost,
+                    }
+                )
 
                 rewards["items"] = items
                 save_rewards(rewards)
@@ -749,27 +986,66 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-        if admin_action == ADMIN_WAIT_DELETE_ITEM:
-            item_name = text.strip().lower()
-            rewards = load_rewards()
-            items = rewards.get("items", [])
-            new_items = [item for item in items if item["name"].strip().lower() != item_name]
+        if admin_action == ADMIN_WAIT_EDIT_ITEM_NAME:
+            try:
+                item_id = int(context.user_data.get("selected_reward_id"))
+                new_name = text.strip()
+                if not new_name:
+                    raise ValueError("Empty name")
 
-            if len(new_items) == len(items):
+                rewards = load_rewards()
+                item = None
+                for entry in rewards.get("items", []):
+                    if int(entry.get("id", 0)) == item_id:
+                        entry["name"] = new_name
+                        item = entry
+                        break
+
+                if not item:
+                    raise ValueError("Item not found")
+
+                save_rewards(rewards)
+                context.user_data.pop(ADMIN_ACTION_KEY, None)
+
                 await update.effective_message.reply_text(
-                    "❌ لم أجد سلعة بهذا الاسم.",
+                    f"✅ تم تعديل اسم السلعة إلى: {new_name}",
+                    reply_markup=selected_reward_menu(item_id),
+                )
+            except Exception:
+                await update.effective_message.reply_text(
+                    "❌ أرسل اسمًا صحيحًا.",
                     reply_markup=admin_rewards_menu(),
                 )
-                return
+            return
 
-            rewards["items"] = new_items
-            save_rewards(rewards)
-            context.user_data.pop(ADMIN_ACTION_KEY, None)
+        if admin_action == ADMIN_WAIT_EDIT_ITEM_COST:
+            try:
+                item_id = int(context.user_data.get("selected_reward_id"))
+                new_cost = parse_int(text)
 
-            await update.effective_message.reply_text(
-                "✅ تم حذف السلعة بنجاح.",
-                reply_markup=admin_rewards_menu(),
-            )
+                rewards = load_rewards()
+                item = None
+                for entry in rewards.get("items", []):
+                    if int(entry.get("id", 0)) == item_id:
+                        entry["cost"] = new_cost
+                        item = entry
+                        break
+
+                if not item:
+                    raise ValueError("Item not found")
+
+                save_rewards(rewards)
+                context.user_data.pop(ADMIN_ACTION_KEY, None)
+
+                await update.effective_message.reply_text(
+                    f"✅ تم تعديل سعر السلعة إلى: {new_cost} نقطة",
+                    reply_markup=selected_reward_menu(item_id),
+                )
+            except Exception:
+                await update.effective_message.reply_text(
+                    "❌ أرسل رقمًا صحيحًا فقط.",
+                    reply_markup=admin_rewards_menu(),
+                )
             return
 
     # ================= استبدال النقاط =================
