@@ -862,7 +862,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "old_to_new":
         old_val = amount
-        new_val = amount / FACTOR
+        new_val = amount / FACTORR
         reply = (
             "💱 ✅ نتيجة التحويل\n\n"
             f"• المبلغ القديم: {fmt_number(old_val)} عملة قديمة\n"
