@@ -726,7 +726,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ تم إرسال طلب الاستبدال للإدارة.",
             reply_markup=referral_menu(),
         )
-
         return
         # ================= لوحة الأدمن =================
 
