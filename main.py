@@ -30,6 +30,7 @@ DATA_DIR.mkdir(exist_ok=True)
 USERS_FILE = DATA_DIR / "users.json"
 CONFIG_FILE = DATA_DIR / "config.json"
 REWARDS_FILE = DATA_DIR / "rewards.json"
+PENDING_REDEEMS_FILE = DATA_DIR / "pending_redeems.json"
 
 # ================= مفاتيح الحالات =================
 ADMIN_ACTION_KEY = "admin_action"
@@ -43,6 +44,8 @@ ADMIN_WAIT_ADD_ITEM_NAME = "admin_wait_add_item_name"
 ADMIN_WAIT_ADD_ITEM_COST = "admin_wait_add_item_cost"
 ADMIN_WAIT_EDIT_ITEM_NAME = "admin_wait_edit_item_name"
 ADMIN_WAIT_EDIT_ITEM_COST = "admin_wait_edit_item_cost"
+ADMIN_WAIT_GRANT_POINTS_USER_ID = "admin_wait_grant_points_user_id"
+ADMIN_WAIT_GRANT_POINTS_AMOUNT = "admin_wait_grant_points_amount"
 
 REF_WAIT_REDEEM = "ref_wait_redeem"
 
@@ -128,6 +131,17 @@ def load_rewards() -> dict:
 
 def save_rewards(data: dict):
     _write_json(REWARDS_FILE, data)
+
+
+def load_pending_redeems() -> dict:
+    data = _read_json(PENDING_REDEEMS_FILE, {"requests": {}})
+    if "requests" not in data or not isinstance(data["requests"], dict):
+        data["requests"] = {}
+    return data
+
+
+def save_pending_redeems(data: dict):
+    _write_json(PENDING_REDEEMS_FILE, data)
 
 
 # ================= أدوات عامة =================
@@ -228,52 +242,108 @@ def get_bot_username(context: ContextTypes.DEFAULT_TYPE) -> str:
     return "YourBot"
 
 
-def get_leaderboard(limit: int = 10) -> list[dict]:
+def get_leaderboard(limit: int = 10) -> list:
     users_data = load_users()
-    results = []
+    items = []
+
     for user in users_data.get("users", {}).values():
         referrals_count = len(user.get("referrals", []))
-        if referrals_count <= 0:
-            continue
-        name = (user.get("full_name") or "").strip() or "مستخدم"
-        results.append(
-            {
-                "name": name,
-                "referrals_count": referrals_count,
-            }
-        )
+        if referrals_count > 0:
+            items.append(
+                {
+                    "full_name": (user.get("full_name") or "").strip() or "مستخدم",
+                    "referrals_count": referrals_count,
+                }
+            )
 
-    results.sort(key=lambda x: x["referrals_count"], reverse=True)
-    return results[:limit]
+    items.sort(key=lambda x: x["referrals_count"], reverse=True)
+    return items[:limit]
 
 
-def find_reward_by_id(item_id: int):
-    rewards = load_rewards()
-    for item in rewards.get("items", []):
-        if int(item.get("id", 0)) == int(item_id):
+def get_next_reward_id() -> int:
+    rewards = load_rewards().get("items", [])
+    if not rewards:
+        return 1
+    return max(int(item.get("id", 0)) for item in rewards) + 1
+
+
+def get_reward_by_id(reward_id: int):
+    rewards = load_rewards().get("items", [])
+    for item in rewards:
+        if int(item.get("id", 0)) == int(reward_id):
             return item
     return None
 
 
-def get_next_reward_id(items: list[dict]) -> int:
-    if not items:
-        return 1
-    return max(int(item.get("id", 0)) for item in items) + 1
+def delete_reward_by_id(reward_id: int) -> bool:
+    rewards_data = load_rewards()
+    old_items = rewards_data.get("items", [])
+    new_items = [item for item in old_items if int(item.get("id", 0)) != int(reward_id)]
+    if len(new_items) == len(old_items):
+        return False
+    rewards_data["items"] = new_items
+    save_rewards(rewards_data)
+    return True
 
 
-def build_rewards_buttons(prefix: str, items: list[dict], include_back_to: str):
-    rows = []
-    for item in items:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    f"{item['name']} — {item['cost']} نقطة",
-                    callback_data=f"{prefix}:{item['id']}",
-                )
-            ]
-        )
-    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=include_back_to)])
-    return InlineKeyboardMarkup(rows)
+def update_reward_name(reward_id: int, new_name: str) -> bool:
+    rewards_data = load_rewards()
+    for item in rewards_data.get("items", []):
+        if int(item.get("id", 0)) == int(reward_id):
+            item["name"] = new_name
+            save_rewards(rewards_data)
+            return True
+    return False
+
+
+def update_reward_cost(reward_id: int, new_cost: int) -> bool:
+    rewards_data = load_rewards()
+    for item in rewards_data.get("items", []):
+        if int(item.get("id", 0)) == int(reward_id):
+            item["cost"] = new_cost
+            save_rewards(rewards_data)
+            return True
+    return False
+
+
+def user_has_pending_redeem(user_id: int) -> bool:
+    pending = load_pending_redeems().get("requests", {})
+    return str(user_id) in pending
+
+
+def create_pending_redeem(user, reward_item: dict) -> dict:
+    pending_data = load_pending_redeems()
+    request = {
+        "user_id": user.id,
+        "username": user.username or "",
+        "full_name": user.full_name or "",
+        "reward_id": int(reward_item["id"]),
+        "reward_name": reward_item["name"],
+        "cost": int(reward_item["cost"]),
+        "status": "pending",
+    }
+    pending_data["requests"][str(user.id)] = request
+    save_pending_redeems(pending_data)
+    return request
+
+
+def get_pending_redeem(user_id: int):
+    pending = load_pending_redeems().get("requests", {})
+    return pending.get(str(user_id))
+
+
+def remove_pending_redeem(user_id: int):
+    pending_data = load_pending_redeems()
+    pending_data.get("requests", {}).pop(str(user_id), None)
+    save_pending_redeems(pending_data)
+
+
+def set_pending_redeem_status(user_id: int, status: str):
+    pending_data = load_pending_redeems()
+    req = pending_data.get("requests", {}).get(str(user_id))
+    if req:
+        req["status"] = status
+        save_pending_redeems(pending_data)
 
 
 # ================= واجهة القوائم =================
@@ -320,6 +390,7 @@ def admin_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("📢 إذاعة للكل", callback_data="admin_broadcast")],
             [InlineKeyboardButton("🎁 إدارة الاستبدال", callback_data="admin_manage_rewards")],
             [InlineKeyboardButton("⭐ تعديل مكافأة الإحالة", callback_data="admin_ref_points")],
+            [InlineKeyboardButton("🎯 منح نقاط", callback_data="admin_grant_points")],
             [InlineKeyboardButton("📊 عدد المستخدمين", callback_data="admin_user_count")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
         ]
@@ -343,6 +414,32 @@ def selected_reward_menu(item_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("💰 تعديل السعر", callback_data=f"admin_edit_reward_cost:{item_id}")],
             [InlineKeyboardButton("❌ حذف السلعة", callback_data=f"admin_delete_reward:{item_id}")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="admin_list_rewards")],
+        ]
+    )
+
+
+def rewards_inline_menu(items: list, prefix: str, back_callback: str) -> InlineKeyboardMarkup:
+    rows = []
+    for item in items:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"{item['name']} — {item['cost']} نقطة",
+                    callback_data=f"{prefix}:{item['id']}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton("🔙 رجوع", callback_data=back_callback)])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_redeem_request_menu(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("✅ قبول", callback_data=f"admin_accept_redeem:{user_id}"),
+                InlineKeyboardButton("❌ رفض", callback_data=f"admin_reject_redeem:{user_id}"),
+            ]
         ]
     )
 
@@ -416,7 +513,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         try:
             referrer_id = int(context.args[0])
-            register_referral(user.id, referrer_id)
+            done = register_referral(user.id, referrer_id)
+            if done and referrer_id != user.id:
+                config = load_config()
+                points = int(config.get("referral_points_per_invite", 1))
+                username = f"@{user.username}" if user.username else "بدون يوزرنيم"
+                full_name = (user.full_name or "").strip() or "مستخدم جديد"
+                notify_text = (
+                    "🎉 تم تسجيل شخص جديد من خلال رابط إحالتك\n\n"
+                    f"👤 الاسم: {full_name}\n"
+                    f"🔗 Username: {username}\n"
+                    f"⭐ تمت إضافة {points} نقطة إلى رصيدك"
+                )
+                try:
+                    await context.bot.send_message(chat_id=referrer_id, text=notify_text)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -425,6 +537,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop(REFERRAL_ACTION_KEY, None)
     context.user_data.pop("new_reward_name", None)
     context.user_data.pop("selected_reward_id", None)
+    context.user_data.pop("grant_points_user_id", None)
 
     await update.effective_message.reply_text(
         WELCOME_TEXT,
@@ -444,24 +557,19 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(BLOCKED_TEXT)
         return
 
+    context.user_data.pop(ADMIN_ACTION_KEY, None)
+    context.user_data.pop(REFERRAL_ACTION_KEY, None)
+
     if q.data == "back":
         context.user_data.pop(MODE_KEY, None)
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
-        context.user_data.pop("new_reward_name", None)
-        context.user_data.pop("selected_reward_id", None)
         await q.edit_message_text(WELCOME_TEXT, reply_markup=main_menu(user.id))
         return
 
     if q.data == "quick_help":
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         await q.edit_message_text(HELP_TEXT, reply_markup=back_menu(user.id))
         return
 
     if q.data == "new_to_old":
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         context.user_data[MODE_KEY] = "new_to_old"
         await q.edit_message_text(
             "🧮 تحويل جديد → قديم\n"
@@ -472,8 +580,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if q.data == "old_to_new":
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         context.user_data[MODE_KEY] = "old_to_new"
         await q.edit_message_text(
             "🧮 تحويل قديم → جديد\n"
@@ -485,8 +591,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ================= نظام الإحالة =================
     if q.data == "referral_menu":
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
         await q.edit_message_text(
             "🎁 نظام الإحالة\n\nاختر القسم الذي تريده:",
             reply_markup=referral_menu(),
@@ -518,6 +622,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "ref_leaderboard":
         leaders = get_leaderboard(limit=10)
+
         if not leaders:
             text = "🏆 المتصدرين\n\nلا يوجد متصدرون حالياً."
         else:
@@ -525,7 +630,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             medals = ["1️⃣", "2️⃣", "3️⃣"]
             for idx, leader in enumerate(leaders, start=1):
                 marker = medals[idx - 1] if idx <= 3 else f"{idx}."
-                lines.append(f"{marker} {leader['name']} — {leader['referrals_count']} إحالة")
+                lines.append(f"{marker} {leader['full_name']} — {leader['referrals_count']} إحالة")
             text = "\n".join(lines)
 
         await q.edit_message_text(text, reply_markup=referral_menu())
@@ -533,6 +638,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if q.data == "redeem_points":
         rewards = load_rewards().get("items", [])
+
         if not rewards:
             await q.edit_message_text(
                 "🎁 قسم الاستبدال\n\nلا توجد سلع متاحة حاليًا.",
@@ -540,76 +646,74 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
+        if user_has_pending_redeem(user.id):
+            await q.answer("طلبك قيد المراجعة، انتظر رد الإدارة.", show_alert=True)
+            return
+
         await q.edit_message_text(
             "🎁 استبدال النقاط\n\nاختر الجائزة التي تريد استبدالها:",
-            reply_markup=build_rewards_buttons(
-                prefix="redeem_reward",
-                items=rewards,
-                include_back_to="referral_menu",
-            ),
+            reply_markup=rewards_inline_menu(rewards, "redeem_item", "referral_menu"),
         )
         return
 
-    if q.data.startswith("redeem_reward:"):
+    if q.data.startswith("redeem_item:"):
         try:
-            item_id = int(q.data.split(":", 1)[1])
+            reward_id = int(q.data.split(":", 1)[1])
         except Exception:
-            await q.edit_message_text("❌ حدث خطأ في اختيار السلعة.", reply_markup=referral_menu())
+            await q.answer("❌ حدث خطأ في اختيار السلعة.", show_alert=True)
             return
 
-        selected_item = find_reward_by_id(item_id)
-        if not selected_item:
-            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=referral_menu())
+        item = get_reward_by_id(reward_id)
+        if not item:
+            await q.answer("❌ هذه السلعة غير موجودة.", show_alert=True)
+            return
+
+        if user_has_pending_redeem(user.id):
+            await q.answer("طلبك قيد المراجعة، انتظر رد الإدارة.", show_alert=True)
             return
 
         users_data = load_users()
-        uid = str(user.id)
-        user_data = users_data["users"].get(uid)
+        user_data = users_data["users"].get(str(user.id))
         if not user_data:
-            ensure_user_exists(user)
-            users_data = load_users()
-            user_data = users_data["users"].get(uid)
-
-        current_points = int(user_data.get("points", 0))
-        cost = int(selected_item["cost"])
-
-        if current_points < cost:
-            await q.edit_message_text(
-                "❌ نقاطك غير كافية لهذا الاستبدال.",
-                reply_markup=build_rewards_buttons(
-                    prefix="redeem_reward",
-                    items=load_rewards().get("items", []),
-                    include_back_to="referral_menu",
-                ),
-            )
             return
 
+        current_points = int(user_data.get("points", 0))
+        cost = int(item.get("cost", 0))
+
+        if current_points < cost:
+            await q.answer("❌ نقاطك غير كافية لهذا الاستبدال.", show_alert=True)
+            return
+
+        # خصم مباشر
         user_data["points"] = current_points - cost
-        user_data["redeem_count"] = int(user_data.get("redeem_count", 0)) + 1
         save_users(users_data)
+
+        # إنشاء طلب قيد المراجعة
+        create_pending_redeem(user, item)
 
         admin_id = _get_admin_id()
         if admin_id:
             username = f"@{user.username}" if user.username else "بدون"
-            full_name = user.full_name or "بدون"
+            full_name = user.full_name or "ㅤ"
             admin_msg = (
-                "🚨 طلب استبدال جديد\n\n"
+                "🚨 طلب استبدال جديد\n"
                 f"👤 الاسم: {full_name}\n"
                 f"🆔 ID: {user.id}\n"
                 f"🔗 Username: {username}\n"
-                f"🎁 السلعة: {selected_item['name']}\n"
+                f"🎁 السلعة: {item['name']}\n"
                 f"⭐ التكلفة: {cost} نقطة"
             )
             try:
-                await context.bot.send_message(chat_id=admin_id, text=admin_msg)
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=admin_msg,
+                    reply_markup=admin_redeem_request_menu(user.id),
+                )
             except Exception:
                 pass
 
         await q.edit_message_text(
-            "✅ تم إرسال طلب الاستبدال إلى الأدمن بنجاح.\n"
-            f"🎁 السلعة: {selected_item['name']}\n"
-            f"⭐ تم خصم: {cost} نقطة",
+            "✅ تم إرسال طلب الاستبدال إلى الإدارة بنجاح.",
             reply_markup=referral_menu(),
         )
         return
@@ -618,10 +722,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_menu":
         if not is_admin(user.id):
             return
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
-        context.user_data.pop("new_reward_name", None)
-        context.user_data.pop("selected_reward_id", None)
         await q.edit_message_text(
             "⚙️ لوحة الأدمن\n\nاختر العملية التي تريدها:",
             reply_markup=admin_menu(),
@@ -672,6 +772,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if q.data == "admin_grant_points":
+        if not is_admin(user.id):
+            return
+        context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_GRANT_POINTS_USER_ID
+        await q.edit_message_text(
+            "🎯 منح نقاط\n\nأرسل الآن ID المستخدم.",
+            reply_markup=admin_menu(),
+        )
+        return
+
     if q.data == "admin_user_count":
         if not is_admin(user.id):
             return
@@ -689,9 +799,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_manage_rewards":
         if not is_admin(user.id):
             return
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-        context.user_data.pop("new_reward_name", None)
-        context.user_data.pop("selected_reward_id", None)
         await q.edit_message_text(
             "🎁 إدارة الاستبدال\n\nاختر العملية التي تريدها:",
             reply_markup=admin_rewards_menu(),
@@ -701,7 +808,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_add_reward":
         if not is_admin(user.id):
             return
-        context.user_data.pop("selected_reward_id", None)
         context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_ADD_ITEM_NAME
         await q.edit_message_text(
             "➕ إضافة سلعة\n\nأرسل الآن اسم السلعة الجديدة.",
@@ -712,6 +818,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if q.data == "admin_list_rewards":
         if not is_admin(user.id):
             return
+
         rewards = load_rewards().get("items", [])
         if not rewards:
             await q.edit_message_text(
@@ -722,113 +829,166 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await q.edit_message_text(
             "📦 السلع الحالية\n\nاضغط على السلعة التي تريد إدارتها:",
-            reply_markup=build_rewards_buttons(
-                prefix="admin_select_reward",
-                items=rewards,
-                include_back_to="admin_manage_rewards",
-            ),
+            reply_markup=rewards_inline_menu(rewards, "admin_reward", "admin_manage_rewards"),
         )
         return
 
-    if q.data.startswith("admin_select_reward:"):
+    if q.data.startswith("admin_reward:"):
         if not is_admin(user.id):
             return
+
         try:
-            item_id = int(q.data.split(":", 1)[1])
+            reward_id = int(q.data.split(":", 1)[1])
         except Exception:
-            await q.edit_message_text("❌ حدث خطأ في اختيار السلعة.", reply_markup=admin_rewards_menu())
+            await q.answer("❌ خطأ في السلعة.", show_alert=True)
             return
 
-        item = find_reward_by_id(item_id)
-        if not item:
-            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+        reward = get_reward_by_id(reward_id)
+        if not reward:
+            await q.answer("❌ هذه السلعة غير موجودة.", show_alert=True)
             return
 
-        context.user_data["selected_reward_id"] = item_id
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
-
+        context.user_data["selected_reward_id"] = reward_id
         await q.edit_message_text(
-            f"🎁 {item['name']}\n\nالسعر: {item['cost']} نقطة",
-            reply_markup=selected_reward_menu(item_id),
+            f"🎁 {reward['name']}\n\n⭐ السعر: {reward['cost']} نقطة",
+            reply_markup=selected_reward_menu(reward_id),
         )
         return
 
     if q.data.startswith("admin_edit_reward_name:"):
         if not is_admin(user.id):
             return
+
         try:
-            item_id = int(q.data.split(":", 1)[1])
+            reward_id = int(q.data.split(":", 1)[1])
         except Exception:
+            await q.answer("❌ خطأ.", show_alert=True)
             return
 
-        item = find_reward_by_id(item_id)
-        if not item:
-            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+        reward = get_reward_by_id(reward_id)
+        if not reward:
+            await q.answer("❌ هذه السلعة غير موجودة.", show_alert=True)
             return
 
-        context.user_data["selected_reward_id"] = item_id
+        context.user_data["selected_reward_id"] = reward_id
         context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_EDIT_ITEM_NAME
 
         await q.edit_message_text(
-            f"✏️ تعديل اسم السلعة\n\nالاسم الحالي: {item['name']}\n\nأرسل الآن الاسم الجديد.",
-            reply_markup=selected_reward_menu(item_id),
+            f"✏️ تعديل الاسم\n\nالاسم الحالي: {reward['name']}\n\nأرسل الاسم الجديد.",
+            reply_markup=selected_reward_menu(reward_id),
         )
         return
 
     if q.data.startswith("admin_edit_reward_cost:"):
         if not is_admin(user.id):
             return
+
         try:
-            item_id = int(q.data.split(":", 1)[1])
+            reward_id = int(q.data.split(":", 1)[1])
         except Exception:
+            await q.answer("❌ خطأ.", show_alert=True)
             return
 
-        item = find_reward_by_id(item_id)
-        if not item:
-            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+        reward = get_reward_by_id(reward_id)
+        if not reward:
+            await q.answer("❌ هذه السلعة غير موجودة.", show_alert=True)
             return
 
-        context.user_data["selected_reward_id"] = item_id
+        context.user_data["selected_reward_id"] = reward_id
         context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_EDIT_ITEM_COST
 
         await q.edit_message_text(
-            f"💰 تعديل سعر السلعة\n\nالسلعة: {item['name']}\nالسعر الحالي: {item['cost']} نقطة\n\nأرسل الآن السعر الجديد.",
-            reply_markup=selected_reward_menu(item_id),
+            f"💰 تعديل السعر\n\nالسلعة: {reward['name']}\nالسعر الحالي: {reward['cost']} نقطة\n\nأرسل السعر الجديد.",
+            reply_markup=selected_reward_menu(reward_id),
         )
         return
 
     if q.data.startswith("admin_delete_reward:"):
         if not is_admin(user.id):
             return
+
         try:
-            item_id = int(q.data.split(":", 1)[1])
+            reward_id = int(q.data.split(":", 1)[1])
         except Exception:
+            await q.answer("❌ خطأ.", show_alert=True)
             return
 
-        rewards = load_rewards()
-        items = rewards.get("items", [])
-        item = None
-        new_items = []
-
-        for entry in items:
-            if int(entry.get("id", 0)) == item_id:
-                item = entry
-            else:
-                new_items.append(entry)
-
-        if not item:
-            await q.edit_message_text("❌ هذه السلعة غير موجودة.", reply_markup=admin_rewards_menu())
+        reward = get_reward_by_id(reward_id)
+        if not reward:
+            await q.answer("❌ هذه السلعة غير موجودة.", show_alert=True)
             return
 
-        rewards["items"] = new_items
-        save_rewards(rewards)
+        delete_reward_by_id(reward_id)
         context.user_data.pop("selected_reward_id", None)
-        context.user_data.pop(ADMIN_ACTION_KEY, None)
 
         await q.edit_message_text(
-            f"✅ تم حذف السلعة: {item['name']}",
+            f"✅ تم حذف السلعة: {reward['name']}",
             reply_markup=admin_rewards_menu(),
         )
+        return
+
+    if q.data.startswith("admin_accept_redeem:"):
+        if not is_admin(user.id):
+            return
+
+        try:
+            target_user_id = int(q.data.split(":", 1)[1])
+        except Exception:
+            await q.answer("❌ خطأ.", show_alert=True)
+            return
+
+        req = get_pending_redeem(target_user_id)
+        if not req:
+            await q.answer("❌ الطلب غير موجود أو تمت معالجته.", show_alert=True)
+            return
+
+        set_pending_redeem_status(target_user_id, "accepted")
+        remove_pending_redeem(target_user_id)
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text="✅ تم قبول طلبك.",
+            )
+        except Exception:
+            pass
+
+        await q.edit_message_text("✅ تم قبول الطلب.")
+        return
+
+    if q.data.startswith("admin_reject_redeem:"):
+        if not is_admin(user.id):
+            return
+
+        try:
+            target_user_id = int(q.data.split(":", 1)[1])
+        except Exception:
+            await q.answer("❌ خطأ.", show_alert=True)
+            return
+
+        req = get_pending_redeem(target_user_id)
+        if not req:
+            await q.answer("❌ الطلب غير موجود أو تمت معالجته.", show_alert=True)
+            return
+
+        users_data = load_users()
+        user_data = users_data["users"].get(str(target_user_id))
+        if user_data:
+            user_data["points"] = int(user_data.get("points", 0)) + int(req.get("cost", 0))
+            save_users(users_data)
+
+        set_pending_redeem_status(target_user_id, "rejected")
+        remove_pending_redeem(target_user_id)
+
+        try:
+            await context.bot.send_message(
+                chat_id=target_user_id,
+                text="❌ تم رفض طلبك وتم استرجاع نقاطك.",
+            )
+        except Exception:
+            pass
+
+        await q.edit_message_text("❌ تم رفض الطلب وإرجاع النقاط للمستخدم.")
         return
 
 
@@ -844,7 +1004,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     admin_action = context.user_data.get(ADMIN_ACTION_KEY)
-    referral_action = context.user_data.get(REFERRAL_ACTION_KEY)
 
     # ================= إجراءات الأدمن =================
     if is_admin(user.id) and admin_action:
@@ -933,6 +1092,66 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
+        if admin_action == ADMIN_WAIT_GRANT_POINTS_USER_ID:
+            try:
+                target_id = parse_int(text)
+                users_data = load_users()
+                if str(target_id) not in users_data.get("users", {}):
+                    await update.effective_message.reply_text(
+                        "❌ هذا المستخدم غير موجود في السجل.",
+                        reply_markup=admin_menu(),
+                    )
+                    return
+
+                context.user_data["grant_points_user_id"] = target_id
+                context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_GRANT_POINTS_AMOUNT
+
+                await update.effective_message.reply_text(
+                    f"🎯 المستخدم: {target_id}\n\nأرسل الآن عدد النقاط التي تريد منحها.",
+                    reply_markup=admin_menu(),
+                )
+            except Exception:
+                await update.effective_message.reply_text(
+                    "❌ أرسل ID صحيح فقط.",
+                    reply_markup=admin_menu(),
+                )
+            return
+
+        if admin_action == ADMIN_WAIT_GRANT_POINTS_AMOUNT:
+            try:
+                amount = parse_int(text)
+                target_id = int(context.user_data.get("grant_points_user_id"))
+                users_data = load_users()
+                user_data = users_data["users"].get(str(target_id))
+                if not user_data:
+                    raise ValueError("User not found")
+
+                user_data["points"] = int(user_data.get("points", 0)) + amount
+                user_data["total_points_earned"] = int(user_data.get("total_points_earned", 0)) + amount
+                save_users(users_data)
+
+                context.user_data.pop("grant_points_user_id", None)
+                context.user_data.pop(ADMIN_ACTION_KEY, None)
+
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_id,
+                        text=f"⭐ تم إضافة {amount} نقطة إلى حسابك.",
+                    )
+                except Exception:
+                    pass
+
+                await update.effective_message.reply_text(
+                    f"✅ تم منح {amount} نقطة للمستخدم: {target_id}",
+                    reply_markup=admin_menu(),
+                )
+            except Exception:
+                await update.effective_message.reply_text(
+                    "❌ أرسل رقمًا صحيحًا فقط.",
+                    reply_markup=admin_menu(),
+                )
+            return
+
         if admin_action == ADMIN_WAIT_ADD_ITEM_NAME:
             item_name = text.strip()
             if not item_name:
@@ -958,19 +1177,15 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not item_name:
                     raise ValueError("Missing item name")
 
-                rewards = load_rewards()
-                items = rewards.get("items", [])
-
-                items.append(
+                rewards_data = load_rewards()
+                rewards_data["items"].append(
                     {
-                        "id": get_next_reward_id(items),
+                        "id": get_next_reward_id(),
                         "name": item_name,
                         "cost": cost,
                     }
                 )
-
-                rewards["items"] = items
-                save_rewards(rewards)
+                save_rewards(rewards_data)
 
                 context.user_data.pop("new_reward_name", None)
                 context.user_data.pop(ADMIN_ACTION_KEY, None)
@@ -988,28 +1203,20 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if admin_action == ADMIN_WAIT_EDIT_ITEM_NAME:
             try:
-                item_id = int(context.user_data.get("selected_reward_id"))
+                reward_id = int(context.user_data.get("selected_reward_id"))
                 new_name = text.strip()
                 if not new_name:
                     raise ValueError("Empty name")
 
-                rewards = load_rewards()
-                item = None
-                for entry in rewards.get("items", []):
-                    if int(entry.get("id", 0)) == item_id:
-                        entry["name"] = new_name
-                        item = entry
-                        break
+                done = update_reward_name(reward_id, new_name)
+                if not done:
+                    raise ValueError("Reward not found")
 
-                if not item:
-                    raise ValueError("Item not found")
-
-                save_rewards(rewards)
                 context.user_data.pop(ADMIN_ACTION_KEY, None)
 
                 await update.effective_message.reply_text(
                     f"✅ تم تعديل اسم السلعة إلى: {new_name}",
-                    reply_markup=selected_reward_menu(item_id),
+                    reply_markup=selected_reward_menu(reward_id),
                 )
             except Exception:
                 await update.effective_message.reply_text(
@@ -1020,26 +1227,18 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if admin_action == ADMIN_WAIT_EDIT_ITEM_COST:
             try:
-                item_id = int(context.user_data.get("selected_reward_id"))
+                reward_id = int(context.user_data.get("selected_reward_id"))
                 new_cost = parse_int(text)
 
-                rewards = load_rewards()
-                item = None
-                for entry in rewards.get("items", []):
-                    if int(entry.get("id", 0)) == item_id:
-                        entry["cost"] = new_cost
-                        item = entry
-                        break
+                done = update_reward_cost(reward_id, new_cost)
+                if not done:
+                    raise ValueError("Reward not found")
 
-                if not item:
-                    raise ValueError("Item not found")
-
-                save_rewards(rewards)
                 context.user_data.pop(ADMIN_ACTION_KEY, None)
 
                 await update.effective_message.reply_text(
                     f"✅ تم تعديل سعر السلعة إلى: {new_cost} نقطة",
-                    reply_markup=selected_reward_menu(item_id),
+                    reply_markup=selected_reward_menu(reward_id),
                 )
             except Exception:
                 await update.effective_message.reply_text(
@@ -1047,73 +1246,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=admin_rewards_menu(),
                 )
             return
-
-    # ================= استبدال النقاط =================
-    if referral_action == REF_WAIT_REDEEM:
-        item_name = (update.effective_message.text or "").strip()
-        rewards = load_rewards().get("items", [])
-        selected_item = None
-
-        for item in rewards:
-            if item["name"].strip().lower() == item_name.lower():
-                selected_item = item
-                break
-
-        if not selected_item:
-            await update.effective_message.reply_text(
-                "❌ لم أجد سلعة بهذا الاسم.\nأرسل الاسم تمامًا كما هو موجود في القائمة.",
-                reply_markup=referral_menu(),
-            )
-            return
-
-        users_data = load_users()
-        uid = str(user.id)
-        user_data = users_data["users"].get(uid)
-        if not user_data:
-            ensure_user_exists(user)
-            users_data = load_users()
-            user_data = users_data["users"].get(uid)
-
-        current_points = int(user_data.get("points", 0))
-        cost = int(selected_item["cost"])
-
-        if current_points < cost:
-            await update.effective_message.reply_text(
-                "❌ نقاطك غير كافية لهذا الاستبدال.",
-                reply_markup=referral_menu(),
-            )
-            return
-
-        user_data["points"] = current_points - cost
-        user_data["redeem_count"] = int(user_data.get("redeem_count", 0)) + 1
-        save_users(users_data)
-
-        context.user_data.pop(REFERRAL_ACTION_KEY, None)
-
-        admin_id = _get_admin_id()
-        if admin_id:
-            username = f"@{user.username}" if user.username else "بدون"
-            full_name = user.full_name or "بدون"
-            admin_msg = (
-                "🚨 طلب استبدال جديد\n\n"
-                f"👤 الاسم: {full_name}\n"
-                f"🆔 ID: {user.id}\n"
-                f"🔗 Username: {username}\n"
-                f"🎁 السلعة: {selected_item['name']}\n"
-                f"⭐ التكلفة: {cost} نقطة"
-            )
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=admin_msg)
-            except Exception:
-                pass
-
-        await update.effective_message.reply_text(
-            "✅ تم إرسال طلب الاستبدال إلى الأدمن بنجاح.\n"
-            f"🎁 السلعة: {selected_item['name']}\n"
-            f"⭐ تم خصم: {cost} نقطة",
-            reply_markup=referral_menu(),
-        )
-        return
 
     # ================= التحويل الأساسي =================
     mode = context.user_data.get(MODE_KEY)
