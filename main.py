@@ -552,3 +552,355 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         WELCOME_TEXT,
         reply_markup=main_menu(user.id),
     )
+    async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    user = update.effective_user
+    if not user:
+        return
+
+    if is_blocked(user.id):
+        await q.edit_message_text(BLOCKED_TEXT)
+        return
+
+    context.user_data.pop(ADMIN_ACTION_KEY, None)
+    context.user_data.pop(REFERRAL_ACTION_KEY, None)
+
+    if q.data == "back":
+        context.user_data.pop(MODE_KEY, None)
+        await q.edit_message_text(WELCOME_TEXT, reply_markup=main_menu(user.id))
+        return
+
+    if q.data == "quick_help":
+        await q.edit_message_text(HELP_TEXT, reply_markup=back_menu(user.id))
+        return
+
+    if q.data == "new_to_old":
+        context.user_data[MODE_KEY] = "new_to_old"
+        await q.edit_message_text(
+            "🧮 تحويل جديد → قديم\n"
+            "اكتب المبلغ بالعملة الجديدة الآن:\n"
+            "مثال: 1250",
+            reply_markup=back_menu(user.id),
+        )
+        return
+
+    if q.data == "old_to_new":
+        context.user_data[MODE_KEY] = "old_to_new"
+        await q.edit_message_text(
+            "🧮 تحويل قديم → جديد\n"
+            "اكتب المبلغ بالعملة القديمة الآن:\n"
+            "مثال: 125000",
+            reply_markup=back_menu(user.id),
+        )
+        return
+
+    # ================= نظام الإحالة =================
+
+    if q.data == "referral_menu":
+        await q.edit_message_text(
+            "🎁 نظام الإحالة\n\nاختر القسم:",
+            reply_markup=referral_menu(),
+        )
+        return
+
+    if q.data == "my_referrals":
+        stats = get_user_stats(user.id)
+
+        await q.edit_message_text(
+            "📊 إحصائيات الإحالة\n\n"
+            f"👥 عدد الإحالات: {stats['referrals_count']}\n"
+            f"⭐ نقاطك الحالية: {stats['points']}\n"
+            f"💰 إجمالي النقاط المكتسبة: {stats['total_points_earned']}\n"
+            f"🎁 مرات الاستبدال: {stats['redeem_count']}",
+            reply_markup=referral_menu(),
+        )
+        return
+
+    if q.data == "my_ref_link":
+        bot_username = get_bot_username(context)
+
+        link = f"https://t.me/{bot_username}?start={user.id}"
+
+        await q.edit_message_text(
+            "🔗 رابط الإحالة الخاص بك:\n\n"
+            f"{link}\n\n"
+            "أرسل الرابط لأصدقائك لتحصل على نقاط.",
+            reply_markup=referral_menu(),
+        )
+        return
+
+    if q.data == "ref_leaderboard":
+
+        leaders = get_leaderboard()
+
+        if not leaders:
+            text = "🏆 لا يوجد متصدرين بعد."
+        else:
+
+            lines = ["🏆 المتصدرين\n"]
+
+            for i, item in enumerate(leaders, 1):
+                lines.append(f"{i} — {item['full_name']} ({item['referrals_count']})")
+
+            text = "\n".join(lines)
+
+        await q.edit_message_text(text, reply_markup=referral_menu())
+        return
+
+    # ================= الاستبدال =================
+
+    if q.data == "redeem_points":
+
+        rewards = load_rewards().get("items", [])
+
+        if not rewards:
+            await q.edit_message_text(
+                "🎁 لا توجد سلع حالياً.",
+                reply_markup=referral_menu(),
+            )
+            return
+
+        if user_has_pending_redeem(user.id):
+
+            await q.answer("طلبك قيد المراجعة، انتظر رد الإدارة.", show_alert=True)
+            return
+
+        await q.edit_message_text(
+            "🎁 اختر السلعة:",
+            reply_markup=rewards_inline_menu(rewards, "redeem_item", "referral_menu"),
+        )
+
+        return
+
+    if q.data.startswith("redeem_item:"):
+
+        reward_id = int(q.data.split(":")[1])
+
+        item = get_reward_by_id(reward_id)
+
+        if not item:
+            await q.answer("السلعة غير موجودة")
+            return
+
+        users_data = load_users()
+        user_data = users_data["users"].get(str(user.id))
+
+        if not user_data:
+            return
+
+        points = int(user_data.get("points", 0))
+        cost = int(item["cost"])
+
+        if points < cost:
+
+            await q.answer("❌ نقاطك غير كافية.", show_alert=True)
+            return
+
+        user_data["points"] = points - cost
+        save_users(users_data)
+
+        req = create_pending_redeem(user, item)
+
+        admin_id = _get_admin_id()
+
+        if admin_id:
+
+            text = (
+                "🚨 طلب استبدال جديد\n\n"
+                f"👤 الاسم: {user.full_name}\n"
+                f"🆔 ID: {user.id}\n"
+                f"🔗 Username: @{user.username}\n"
+                f"🎁 السلعة: {item['name']}\n"
+                f"⭐ التكلفة: {item['cost']} نقطة"
+            )
+
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                reply_markup=admin_redeem_request_menu(user.id),
+            )
+
+        await q.edit_message_text(
+            "✅ تم إرسال طلب الاستبدال للإدارة.",
+            reply_markup=referral_menu(),
+        )
+
+        return# ================= لوحة الأدمن =================
+
+    if q.data == "admin_menu":
+        if not is_admin(user.id):
+            return
+
+        await q.edit_message_text(
+            "⚙️ لوحة الأدمن",
+            reply_markup=admin_menu(),
+        )
+        return
+
+    if q.data == "admin_user_count":
+
+        users = load_users()
+
+        total = len(users.get("users", {}))
+
+        config = load_config()
+
+        blocked = len(config.get("blocked_users", []))
+
+        await q.edit_message_text(
+            "📊 إحصائيات المستخدمين\n\n"
+            f"👥 إجمالي المستخدمين: {total}\n"
+            f"⛔ المحظورين: {blocked}",
+            reply_markup=admin_menu(),
+        )
+        return
+
+    # ================= قبول الاستبدال =================
+
+    if q.data.startswith("admin_accept_redeem:"):
+
+        if not is_admin(user.id):
+            return
+
+        uid = int(q.data.split(":")[1])
+
+        req = get_pending_redeem(uid)
+
+        if not req:
+            await q.answer("الطلب غير موجود")
+            return
+
+        set_pending_redeem_status(uid, "accepted")
+
+        remove_pending_redeem(uid)
+
+        await context.bot.send_message(
+            chat_id=uid,
+            text="✅ تم قبول طلبك.",
+        )
+
+        await q.edit_message_text("تم قبول الطلب.")
+
+        return
+
+    # ================= رفض الاستبدال =================
+
+    if q.data.startswith("admin_reject_redeem:"):
+
+        if not is_admin(user.id):
+            return
+
+        uid = int(q.data.split(":")[1])
+
+        req = get_pending_redeem(uid)
+
+        if not req:
+            await q.answer("الطلب غير موجود")
+            return
+
+        users = load_users()
+
+        user_data = users["users"].get(str(uid))
+
+        if user_data:
+
+            user_data["points"] = int(user_data.get("points", 0)) + int(req["cost"])
+
+            save_users(users)
+
+        remove_pending_redeem(uid)
+
+        await context.bot.send_message(
+            chat_id=uid,
+            text="❌ تم رفض طلبك وتم استرجاع نقاطك.",
+        )
+
+        await q.edit_message_text("تم رفض الطلب.")
+
+        return
+
+
+async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    ensure_user_exists(user)
+
+    if is_blocked(user.id):
+        await update.effective_message.reply_text(BLOCKED_TEXT)
+        return
+
+    mode = context.user_data.get(MODE_KEY)
+
+    if mode not in ("old_to_new", "new_to_old"):
+        return
+
+    try:
+
+        amount = normalize_amount(update.effective_message.text)
+
+    except Exception:
+
+        await update.effective_message.reply_text(
+            "❌ اكتب رقم صحيح.",
+            reply_markup=back_menu(user.id),
+        )
+
+        return
+
+    if mode == "old_to_new":
+
+        old_val = amount
+        new_val = amount / FACTOR
+
+        text = (
+            "💱 نتيجة التحويل\n\n"
+            f"قديم: {fmt_number(old_val)}\n"
+            f"جديد: {fmt_number(new_val)}"
+        )
+
+    else:
+
+        new_val = amount
+        old_val = amount * FACTOR
+
+        text = (
+            "💱 نتيجة التحويل\n\n"
+            f"جديد: {fmt_number(new_val)}\n"
+            f"قديم: {fmt_number(old_val)}"
+        )
+
+    await update.effective_message.reply_text(
+        text,
+        reply_markup=back_menu(user.id),
+    )
+
+
+def main():
+
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN missing")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+
+    app.add_handler(CallbackQueryHandler(on_button))
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_amount,
+        )
+    )
+
+    app.run_polling(drop_pending_updates=True)
+
+
+if __name__ == "__main__":
+    main()
