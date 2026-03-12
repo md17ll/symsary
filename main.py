@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import re
 from decimal import Decimal
 from pathlib import Path
@@ -23,9 +24,8 @@ MODE_KEY = "mode"        # old_to_new | new_to_old
 NOTIFIED_USERS = set()
 
 # ================= ملفات التخزين =================
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path("/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 USERS_FILE = DATA_DIR / "users.json"
 CONFIG_FILE = DATA_DIR / "config.json"
@@ -197,32 +197,61 @@ def is_referral_enabled() -> bool:
 def ensure_user_exists(user) -> dict:
     users_data = load_users()
     uid = str(user.id)
+
     if uid not in users_data["users"]:
         users_data["users"][uid] = {
             "id": user.id,
             "username": user.username or "",
             "full_name": user.full_name or "",
             "referred_by": None,
+            "pending_referrer_id": None,
             "referrals": [],
             "points": 0,
             "total_points_earned": 0,
             "redeem_count": 0,
             "joined": True,
+            "human_verified": False,
+            "referral_counted": False,
+            "referral_reward_reverted": False,
+            "captcha_question": "",
+            "captcha_answer": None,
         }
     else:
         users_data["users"][uid]["username"] = user.username or ""
         users_data["users"][uid]["full_name"] = user.full_name or ""
+
+        if "referred_by" not in users_data["users"][uid]:
+            users_data["users"][uid]["referred_by"] = None
+        if "pending_referrer_id" not in users_data["users"][uid]:
+            users_data["users"][uid]["pending_referrer_id"] = None
+        if "referrals" not in users_data["users"][uid] or not isinstance(users_data["users"][uid]["referrals"], list):
+            users_data["users"][uid]["referrals"] = []
+        if "points" not in users_data["users"][uid]:
+            users_data["users"][uid]["points"] = 0
+        if "total_points_earned" not in users_data["users"][uid]:
+            users_data["users"][uid]["total_points_earned"] = 0
+        if "redeem_count" not in users_data["users"][uid]:
+            users_data["users"][uid]["redeem_count"] = 0
+        if "human_verified" not in users_data["users"][uid]:
+            users_data["users"][uid]["human_verified"] = False
+        if "referral_counted" not in users_data["users"][uid]:
+            users_data["users"][uid]["referral_counted"] = False
+        if "referral_reward_reverted" not in users_data["users"][uid]:
+            users_data["users"][uid]["referral_reward_reverted"] = False
+        if "captcha_question" not in users_data["users"][uid]:
+            users_data["users"][uid]["captcha_question"] = ""
+        if "captcha_answer" not in users_data["users"][uid]:
+            users_data["users"][uid]["captcha_answer"] = None
+
     save_users(users_data)
     return users_data["users"][uid]
 
 
-def register_referral(new_user_id: int, referrer_id: int) -> bool:
+def set_pending_referral(new_user_id: int, referrer_id: int) -> bool:
     if new_user_id == referrer_id:
         return False
 
     users_data = load_users()
-    config = load_config()
-
     new_uid = str(new_user_id)
     ref_uid = str(referrer_id)
 
@@ -230,12 +259,49 @@ def register_referral(new_user_id: int, referrer_id: int) -> bool:
         return False
 
     new_user = users_data["users"][new_uid]
-    ref_user = users_data["users"][ref_uid]
 
+    if new_user.get("referral_counted"):
+        return False
     if new_user.get("referred_by"):
         return False
+    if new_user.get("pending_referrer_id"):
+        return False
+
+    new_user["pending_referrer_id"] = referrer_id
+    save_users(users_data)
+    return True
+
+
+def finalize_referral(new_user_id: int) -> bool:
+    users_data = load_users()
+    config = load_config()
+
+    new_uid = str(new_user_id)
+    if new_uid not in users_data["users"]:
+        return False
+
+    new_user = users_data["users"][new_uid]
+    referrer_id = new_user.get("pending_referrer_id")
+
+    if not referrer_id:
+        return False
+    if new_user_id == referrer_id:
+        return False
+
+    ref_uid = str(referrer_id)
+    if ref_uid not in users_data["users"]:
+        return False
+
+    if new_user.get("referral_counted"):
+        return False
+    if not new_user.get("human_verified"):
+        return False
+
+    ref_user = users_data["users"][ref_uid]
 
     new_user["referred_by"] = referrer_id
+    new_user["referral_counted"] = True
+    new_user["referral_reward_reverted"] = False
 
     referrals = ref_user.get("referrals", [])
     if new_user_id not in referrals:
@@ -248,6 +314,46 @@ def register_referral(new_user_id: int, referrer_id: int) -> bool:
 
     save_users(users_data)
     return True
+
+
+def revert_referral_reward(left_user_id: int) -> tuple[bool, int | None]:
+    users_data = load_users()
+    config = load_config()
+
+    uid = str(left_user_id)
+    if uid not in users_data["users"]:
+        return False, None
+
+    left_user = users_data["users"][uid]
+
+    if not left_user.get("referral_counted"):
+        return False, None
+    if left_user.get("referral_reward_reverted"):
+        return False, None
+
+    referrer_id = left_user.get("referred_by")
+    if not referrer_id:
+        return False, None
+
+    ref_uid = str(referrer_id)
+    if ref_uid not in users_data["users"]:
+        left_user["referral_reward_reverted"] = True
+        save_users(users_data)
+        return False, referrer_id
+
+    ref_user = users_data["users"][ref_uid]
+    points = int(config.get("referral_points_per_invite", 1))
+
+    ref_user["points"] = int(ref_user.get("points", 0)) - points
+    referrals = ref_user.get("referrals", [])
+    if left_user_id in referrals:
+        referrals.remove(left_user_id)
+    ref_user["referrals"] = referrals
+
+    left_user["referral_reward_reverted"] = True
+
+    save_users(users_data)
+    return True, referrer_id
 
 
 def get_user_stats(user_id: int) -> dict:
@@ -408,6 +514,48 @@ def normalize_channel_input(text: str) -> tuple[str, str]:
     raise ValueError("Invalid channel format")
 
 
+def build_math_captcha() -> tuple[str, int]:
+    op = random.choice(["+", "-", "×", "÷"])
+
+    if op == "+":
+        a = random.randint(1, 20)
+        b = random.randint(1, 20)
+        return f"{a} + {b}", a + b
+
+    if op == "-":
+        a = random.randint(5, 25)
+        b = random.randint(1, a)
+        return f"{a} - {b}", a - b
+
+    if op == "×":
+        a = random.randint(2, 12)
+        b = random.randint(2, 12)
+        return f"{a} × {b}", a * b
+
+    b = random.randint(2, 12)
+    result = random.randint(1, 12)
+    a = b * result
+    return f"{a} ÷ {b}", result
+
+
+def prepare_user_captcha(user_id: int) -> str:
+    users_data = load_users()
+    uid = str(user_id)
+    if uid not in users_data["users"]:
+        raise ValueError("User not found")
+
+    question, answer = build_math_captcha()
+    users_data["users"][uid]["captcha_question"] = question
+    users_data["users"][uid]["captcha_answer"] = int(answer)
+    save_users(users_data)
+    return question
+
+
+def get_user_data(user_id: int) -> dict | None:
+    users_data = load_users()
+    return users_data["users"].get(str(user_id))
+
+
 async def is_user_subscribed(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     config = load_config()
     forced_sub_channel = (config.get("forced_sub_channel") or "").strip()
@@ -436,6 +584,62 @@ def force_subscribe_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def apply_leave_penalty_if_needed(context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    if is_admin(user_id):
+        return
+
+    user_data = get_user_data(user_id)
+    if not user_data:
+        return
+
+    if not user_data.get("referral_counted"):
+        return
+    if user_data.get("referral_reward_reverted"):
+        return
+
+    changed, referrer_id = revert_referral_reward(user_id)
+    if changed and referrer_id:
+        try:
+            await context.bot.send_message(
+                chat_id=referrer_id,
+                text="❌ تم خصم النقاط بسبب مغادرة الشخص المحال لقناة الاشتراك الإجباري.",
+            )
+        except Exception:
+            pass
+
+
+async def maybe_prompt_human_check(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    if is_admin(user_id):
+        return False
+
+    user_data = get_user_data(user_id)
+    if not user_data:
+        return False
+
+    if user_data.get("referral_counted"):
+        return False
+    if user_data.get("human_verified"):
+        return False
+    if not user_data.get("pending_referrer_id"):
+        return False
+
+    question = user_data.get("captcha_question") or prepare_user_captcha(user_id)
+
+    text = (
+        "🤖 تحقق أمني بسيط\n\n"
+        "حتى يتم احتساب الإحالة والتأكد أنك مستخدم حقيقي، أجب على سؤال الرياضيات التالي:\n\n"
+        f"{question}\n\n"
+        "✍️ أرسل الجواب الآن كرقم فقط."
+    )
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text)
+    else:
+        await update.effective_message.reply_text(text)
+
+    return True
+
+
 async def enforce_access(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
     if not user_id:
         return False
@@ -459,6 +663,7 @@ async def enforce_access(update: Update, context: ContextTypes.DEFAULT_TYPE, use
 
     subscribed = await is_user_subscribed(context, user_id)
     if not subscribed:
+        await apply_leave_penalty_if_needed(context, user_id)
         if update.callback_query:
             await update.callback_query.edit_message_text(
                 FORCE_SUBSCRIBE_TEXT,
@@ -469,6 +674,10 @@ async def enforce_access(update: Update, context: ContextTypes.DEFAULT_TYPE, use
                 FORCE_SUBSCRIBE_TEXT,
                 reply_markup=force_subscribe_menu(),
             )
+        return False
+
+    prompt_needed = await maybe_prompt_human_check(update, context, user_id)
+    if prompt_needed:
         return False
 
     return True
@@ -616,7 +825,7 @@ def fmt_number(d: Decimal) -> str:
 def parse_int(text: str) -> int:
     t = (text or "").strip()
     t = t.translate(_ARABIC_DIGITS).translate(_EASTERN_ARABIC_DIGITS)
-    m = re.search(r"\d+", t)
+    m = re.search(r"-?\d+", t)
     if not m:
         raise ValueError("No int found")
     return int(m.group(0))
@@ -654,26 +863,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # تسجيل الإحالة عند أول دخول فقط
     if context.args:
         try:
             referrer_id = int(context.args[0])
-            done = register_referral(user.id, referrer_id)
-            if done and referrer_id != user.id:
-                config = load_config()
-                points = int(config.get("referral_points_per_invite", 1))
-                username = f"@{user.username}" if user.username else "بدون يوزرنيم"
-                full_name = (user.full_name or "").strip() or "مستخدم جديد"
-                notify_text = (
-                    "🎉 تم تسجيل شخص جديد من خلال رابط إحالتك\n\n"
-                    f"👤 الاسم: {full_name}\n"
-                    f"🔗 Username: {username}\n"
-                    f"⭐ تمت إضافة {points} نقطة إلى رصيدك"
-                )
-                try:
-                    await context.bot.send_message(chat_id=referrer_id, text=notify_text)
-                except Exception:
-                    pass
+            set_pending_referral(user.id, referrer_id)
         except Exception:
             pass
 
@@ -687,10 +880,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(user.id):
         subscribed = await is_user_subscribed(context, user.id)
         if not subscribed:
+            await apply_leave_penalty_if_needed(context, user.id)
             await update.effective_message.reply_text(
                 FORCE_SUBSCRIBE_TEXT,
                 reply_markup=force_subscribe_menu(),
             )
+            return
+
+        prompt_needed = await maybe_prompt_human_check(update, context, user.id)
+        if prompt_needed:
             return
 
     await update.effective_message.reply_text(
@@ -721,17 +919,23 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         subscribed = await is_user_subscribed(context, user.id)
-        if subscribed:
-            await q.edit_message_text(
-                "✅ تم التحقق من اشتراكك بنجاح.\n\n" + WELCOME_TEXT,
-                reply_markup=main_menu(user.id),
-            )
-        else:
+        if not subscribed:
+            await apply_leave_penalty_if_needed(context, user.id)
             await q.answer("❌ لم يتم العثور على اشتراكك بعد.", show_alert=True)
             await q.edit_message_text(
                 FORCE_SUBSCRIBE_TEXT,
                 reply_markup=force_subscribe_menu(),
             )
+            return
+
+        prompt_needed = await maybe_prompt_human_check(update, context, user.id)
+        if prompt_needed:
+            return
+
+        await q.edit_message_text(
+            "✅ تم التحقق من اشتراكك بنجاح.\n\n" + WELCOME_TEXT,
+            reply_markup=main_menu(user.id),
+        )
         return
 
     allowed = await enforce_access(update, context, user.id)
@@ -800,7 +1004,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(
             "🔗 رابط الإحالة الخاص بك:\n\n"
             f"{ref_link}\n\n"
-            "📌 أرسل الرابط لأصدقائك، وكل شخص يدخل من خلاله يمنحك نقاطًا حسب مكافأة الإحالة الحالية.",
+            "📌 أرسل الرابط لأصدقائك، وبعد الاشتراك والنجاح في التحقق يتم احتساب الإحالة.",
             reply_markup=referral_menu(),
         )
         return
@@ -869,11 +1073,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("❌ نقاطك غير كافية لهذا الاستبدال.", show_alert=True)
             return
 
-        # خصم مباشر
         user_data["points"] = current_points - cost
         save_users(users_data)
 
-        # إنشاء طلب قيد المراجعة
         create_pending_redeem(user, item)
 
         admin_id = _get_admin_id()
@@ -1177,6 +1379,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("❌ الطلب غير موجود أو تمت معالجته.", show_alert=True)
             return
 
+        users_data = load_users()
+        user_data = users_data["users"].get(str(target_user_id))
+        if user_data:
+            user_data["redeem_count"] = int(user_data.get("redeem_count", 0)) + 1
+            save_users(users_data)
+
         set_pending_redeem_status(target_user_id, "accepted")
         remove_pending_redeem(target_user_id)
 
@@ -1234,16 +1442,100 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ensure_user_exists(user)
 
-    allowed = await enforce_access(update, context, user.id)
-    if not allowed:
+    if is_blocked(user.id):
+        await update.effective_message.reply_text(BLOCKED_TEXT)
         return
+
+    if not is_admin(user.id) and not is_bot_enabled():
+        await update.effective_message.reply_text(BOT_STOPPED_TEXT)
+        return
+
+    text = update.effective_message.text or ""
+
+    if not is_admin(user.id):
+        subscribed = await is_user_subscribed(context, user.id)
+        if not subscribed:
+            await apply_leave_penalty_if_needed(context, user.id)
+            await update.effective_message.reply_text(
+                FORCE_SUBSCRIBE_TEXT,
+                reply_markup=force_subscribe_menu(),
+            )
+            return
+
+        user_data = get_user_data(user.id)
+        if user_data and user_data.get("pending_referrer_id") and not user_data.get("human_verified"):
+            try:
+                answer = parse_int(text)
+            except Exception:
+                question = user_data.get("captcha_question") or prepare_user_captcha(user.id)
+                await update.effective_message.reply_text(
+                    "❌ أرسل جواب سؤال التحقق كرقم فقط.\n\n"
+                    f"السؤال: {question}"
+                )
+                return
+
+            expected = user_data.get("captcha_answer")
+            if expected is None:
+                question = prepare_user_captcha(user.id)
+                await update.effective_message.reply_text(
+                    "🤖 تحقق أمني بسيط\n\n"
+                    f"{question}\n\n"
+                    "✍️ أرسل الجواب الآن كرقم فقط."
+                )
+                return
+
+            if int(answer) != int(expected):
+                question = prepare_user_captcha(user.id)
+                await update.effective_message.reply_text(
+                    "❌ جواب خاطئ.\n\n"
+                    "🔄 تم توليد سؤال جديد:\n"
+                    f"{question}\n\n"
+                    "✍️ أرسل الجواب الصحيح كرقم فقط."
+                )
+                return
+
+            users_data = load_users()
+            target_user = users_data["users"].get(str(user.id))
+            if not target_user:
+                return
+
+            target_user["human_verified"] = True
+            target_user["captcha_question"] = ""
+            target_user["captcha_answer"] = None
+            save_users(users_data)
+
+            counted = finalize_referral(user.id)
+
+            if counted:
+                current_user_data = get_user_data(user.id)
+                referrer_id = current_user_data.get("referred_by") if current_user_data else None
+
+                if referrer_id:
+                    config = load_config()
+                    points = int(config.get("referral_points_per_invite", 1))
+                    username = f"@{user.username}" if user.username else "بدون يوزرنيم"
+                    full_name = (user.full_name or "").strip() or "مستخدم جديد"
+                    notify_text = (
+                        "🎉 تم تسجيل شخص جديد من خلال رابط إحالتك بعد التحقق بنجاح\n\n"
+                        f"👤 الاسم: {full_name}\n"
+                        f"🔗 Username: {username}\n"
+                        f"⭐ تمت إضافة {points} نقطة إلى رصيدك"
+                    )
+                    try:
+                        await context.bot.send_message(chat_id=referrer_id, text=notify_text)
+                    except Exception:
+                        pass
+
+            await update.effective_message.reply_text(
+                "✅ تم التحقق منك بنجاح وتم احتساب الإحالة.\n\n" + WELCOME_TEXT,
+                reply_markup=main_menu(user.id),
+            )
+            return
 
     admin_action = context.user_data.get(ADMIN_ACTION_KEY)
 
     # ================= إجراءات الأدمن =================
     if is_admin(user.id) and admin_action:
-        text = update.effective_message.text or ""
-
         if admin_action == ADMIN_WAIT_BAN:
             try:
                 target_id = parse_int(text)
@@ -1529,13 +1821,12 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             return
 
-    # ================= التحويل الأساسي =================
     mode = context.user_data.get(MODE_KEY)
     if mode not in ("old_to_new", "new_to_old"):
         return
 
     try:
-        amount = normalize_amount(update.effective_message.text)
+        amount = normalize_amount(text)
     except Exception:
         await update.effective_message.reply_text(
             "❌ ما قدرت أفهم الرقم.\nاكتب رقم فقط مثل: 125000 أو 125,000",
