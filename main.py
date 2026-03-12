@@ -46,6 +46,7 @@ ADMIN_WAIT_EDIT_ITEM_NAME = "admin_wait_edit_item_name"
 ADMIN_WAIT_EDIT_ITEM_COST = "admin_wait_edit_item_cost"
 ADMIN_WAIT_GRANT_POINTS_USER_ID = "admin_wait_grant_points_user_id"
 ADMIN_WAIT_GRANT_POINTS_AMOUNT = "admin_wait_grant_points_amount"
+ADMIN_WAIT_FORCE_SUB_CHANNEL = "admin_wait_force_sub_channel"
 
 REF_WAIT_REDEEM = "ref_wait_redeem"
 
@@ -73,6 +74,11 @@ HELP_TEXT = (
 )
 
 BLOCKED_TEXT = "⛔ أنت محظور من استخدام هذا البوت."
+BOT_STOPPED_TEXT = "⛔ البوت متوقف حالياً من قبل الإدارة."
+FORCE_SUBSCRIBE_TEXT = (
+    "🔒 يجب عليك الاشتراك في القناة أولاً لاستخدام البوت.\n\n"
+    "اشترك ثم اضغط على زر التحقق من الاشتراك."
+)
 
 # ================= أدوات ملفات =================
 def _read_json(path: Path, default):
@@ -109,12 +115,21 @@ def load_config() -> dict:
         {
             "referral_points_per_invite": 1,
             "blocked_users": [],
+            "forced_sub_channel": "",
+            "forced_sub_link": "",
+            "bot_enabled": True,
         },
     )
     if "referral_points_per_invite" not in data:
         data["referral_points_per_invite"] = 1
     if "blocked_users" not in data or not isinstance(data["blocked_users"], list):
         data["blocked_users"] = []
+    if "forced_sub_channel" not in data:
+        data["forced_sub_channel"] = ""
+    if "forced_sub_link" not in data:
+        data["forced_sub_link"] = ""
+    if "bot_enabled" not in data:
+        data["bot_enabled"] = True
     return data
 
 
@@ -164,6 +179,11 @@ def is_blocked(user_id: int | None) -> bool:
         return False
     config = load_config()
     return int(user_id) in set(config.get("blocked_users", []))
+
+
+def is_bot_enabled() -> bool:
+    config = load_config()
+    return bool(config.get("bot_enabled", True))
 
 
 def ensure_user_exists(user) -> dict:
@@ -346,10 +366,111 @@ def set_pending_redeem_status(user_id: int, status: str):
         save_pending_redeems(pending_data)
 
 
+def normalize_channel_input(text: str) -> tuple[str, str]:
+    t = (text or "").strip()
+
+    if not t:
+        raise ValueError("Empty channel")
+
+    if t.startswith("https://t.me/"):
+        username = t.replace("https://t.me/", "").strip().strip("/")
+        if not username:
+            raise ValueError("Invalid channel link")
+        if username.startswith("+"):
+            raise ValueError("Invite links are not supported")
+        return f"@{username}", f"https://t.me/{username}"
+
+    if t.startswith("http://t.me/"):
+        username = t.replace("http://t.me/", "").strip().strip("/")
+        if not username:
+            raise ValueError("Invalid channel link")
+        if username.startswith("+"):
+            raise ValueError("Invite links are not supported")
+        return f"@{username}", f"https://t.me/{username}"
+
+    if t.startswith("@"):
+        username = t[1:].strip()
+        if not username:
+            raise ValueError("Invalid username")
+        return f"@{username}", f"https://t.me/{username}"
+
+    if re.fullmatch(r"-?\d+", t):
+        return t, ""
+
+    raise ValueError("Invalid channel format")
+
+
+async def is_user_subscribed(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    config = load_config()
+    forced_sub_channel = (config.get("forced_sub_channel") or "").strip()
+
+    if not forced_sub_channel:
+        return True
+
+    try:
+        member = await context.bot.get_chat_member(chat_id=forced_sub_channel, user_id=user_id)
+        status = getattr(member, "status", "")
+        return status in ("member", "administrator", "creator", "restricted")
+    except Exception:
+        return False
+
+
+def force_subscribe_menu() -> InlineKeyboardMarkup:
+    config = load_config()
+    rows = []
+
+    forced_sub_link = (config.get("forced_sub_link") or "").strip()
+    if forced_sub_link:
+        rows.append([InlineKeyboardButton("📢 الاشتراك في القناة", url=forced_sub_link)])
+
+    rows.append([InlineKeyboardButton("✅ التحقق من الاشتراك", callback_data="check_subscription")])
+
+    return InlineKeyboardMarkup(rows)
+
+
+async def enforce_access(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int | None) -> bool:
+    if not user_id:
+        return False
+
+    if is_admin(user_id):
+        return True
+
+    if is_blocked(user_id):
+        target = update.callback_query if update.callback_query else update.effective_message
+        if update.callback_query:
+            await update.callback_query.edit_message_text(BLOCKED_TEXT)
+        else:
+            await target.reply_text(BLOCKED_TEXT)
+        return False
+
+    if not is_bot_enabled():
+        target = update.callback_query if update.callback_query else update.effective_message
+        if update.callback_query:
+            await update.callback_query.edit_message_text(BOT_STOPPED_TEXT)
+        else:
+            await target.reply_text(BOT_STOPPED_TEXT)
+        return False
+
+    subscribed = await is_user_subscribed(context, user_id)
+    if not subscribed:
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                FORCE_SUBSCRIBE_TEXT,
+                reply_markup=force_subscribe_menu(),
+            )
+        else:
+            await update.effective_message.reply_text(
+                FORCE_SUBSCRIBE_TEXT,
+                reply_markup=force_subscribe_menu(),
+            )
+        return False
+
+    return True
+
+
 # ================= واجهة القوائم =================
 def main_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("🎁 نظام الإحالة", callback_data="referral_menu")],
         [
             InlineKeyboardButton("💰 تحويل قديم → جديد", callback_data="old_to_new"),
             InlineKeyboardButton("💵 تحويل جديد → قديم", callback_data="new_to_old"),
@@ -383,6 +504,9 @@ def referral_menu() -> InlineKeyboardMarkup:
 
 
 def admin_menu() -> InlineKeyboardMarkup:
+    config = load_config()
+    bot_toggle_text = "🛑 إيقاف البوت" if config.get("bot_enabled", True) else "▶️ تشغيل البوت"
+
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🚫 حظر شخص", callback_data="admin_ban")],
@@ -391,6 +515,8 @@ def admin_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🎁 إدارة الاستبدال", callback_data="admin_manage_rewards")],
             [InlineKeyboardButton("⭐ تعديل مكافأة الإحالة", callback_data="admin_ref_points")],
             [InlineKeyboardButton("🎯 منح نقاط", callback_data="admin_grant_points")],
+            [InlineKeyboardButton("📡 تعيين قناة الاشتراك", callback_data="admin_set_force_sub")],
+            [InlineKeyboardButton(bot_toggle_text, callback_data="admin_toggle_bot")],
             [InlineKeyboardButton("📊 عدد المستخدمين", callback_data="admin_user_count")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
         ]
@@ -493,6 +619,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(BLOCKED_TEXT)
         return
 
+    if not is_admin(user.id) and not is_bot_enabled():
+        await update.effective_message.reply_text(BOT_STOPPED_TEXT)
+        return
+
     admin_id = _get_admin_id()
     if admin_id and user.id not in NOTIFIED_USERS:
         NOTIFIED_USERS.add(user.id)
@@ -539,6 +669,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("selected_reward_id", None)
     context.user_data.pop("grant_points_user_id", None)
 
+    if not is_admin(user.id):
+        subscribed = await is_user_subscribed(context, user.id)
+        if not subscribed:
+            await update.effective_message.reply_text(
+                FORCE_SUBSCRIBE_TEXT,
+                reply_markup=force_subscribe_menu(),
+            )
+            return
+
     await update.effective_message.reply_text(
         WELCOME_TEXT,
         reply_markup=main_menu(user.id),
@@ -553,8 +692,35 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
 
-    if is_blocked(user.id):
-        await q.edit_message_text(BLOCKED_TEXT)
+    if q.data == "check_subscription":
+        if is_admin(user.id):
+            await q.edit_message_text(WELCOME_TEXT, reply_markup=main_menu(user.id))
+            return
+
+        if is_blocked(user.id):
+            await q.edit_message_text(BLOCKED_TEXT)
+            return
+
+        if not is_bot_enabled():
+            await q.edit_message_text(BOT_STOPPED_TEXT)
+            return
+
+        subscribed = await is_user_subscribed(context, user.id)
+        if subscribed:
+            await q.edit_message_text(
+                "✅ تم التحقق من اشتراكك بنجاح.\n\n" + WELCOME_TEXT,
+                reply_markup=main_menu(user.id),
+            )
+        else:
+            await q.answer("❌ لم يتم العثور على اشتراكك بعد.", show_alert=True)
+            await q.edit_message_text(
+                FORCE_SUBSCRIBE_TEXT,
+                reply_markup=force_subscribe_menu(),
+            )
+        return
+
+    allowed = await enforce_access(update, context, user.id)
+    if not allowed:
         return
 
     context.user_data.pop(ADMIN_ACTION_KEY, None)
@@ -782,6 +948,40 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if q.data == "admin_set_force_sub":
+        if not is_admin(user.id):
+            return
+        config = load_config()
+        current_channel = (config.get("forced_sub_channel") or "").strip() or "غير معين"
+        context.user_data[ADMIN_ACTION_KEY] = ADMIN_WAIT_FORCE_SUB_CHANNEL
+        await q.edit_message_text(
+            "📡 تعيين قناة الاشتراك الإجباري\n\n"
+            f"القناة الحالية: {current_channel}\n\n"
+            "أرسل الآن يوزر القناة بهذا الشكل:\n"
+            "@channelusername\n\n"
+            "أو رابطها بهذا الشكل:\n"
+            "https://t.me/channelusername\n\n"
+            "أو أرسل 0 لإلغاء الاشتراك الإجباري.",
+            reply_markup=admin_menu(),
+        )
+        return
+
+    if q.data == "admin_toggle_bot":
+        if not is_admin(user.id):
+            return
+
+        config = load_config()
+        current = bool(config.get("bot_enabled", True))
+        config["bot_enabled"] = not current
+        save_config(config)
+
+        status_text = "✅ تم تشغيل البوت." if config["bot_enabled"] else "🛑 تم إيقاف البوت."
+        await q.edit_message_text(
+            status_text,
+            reply_markup=admin_menu(),
+        )
+        return
+
     if q.data == "admin_user_count":
         if not is_admin(user.id):
             return
@@ -999,8 +1199,8 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ensure_user_exists(user)
 
-    if is_blocked(user.id):
-        await update.effective_message.reply_text(BLOCKED_TEXT)
+    allowed = await enforce_access(update, context, user.id)
+    if not allowed:
         return
 
     admin_action = context.user_data.get(ADMIN_ACTION_KEY)
@@ -1148,6 +1348,55 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 await update.effective_message.reply_text(
                     "❌ أرسل رقمًا صحيحًا فقط.",
+                    reply_markup=admin_menu(),
+                )
+            return
+
+        if admin_action == ADMIN_WAIT_FORCE_SUB_CHANNEL:
+            try:
+                raw = text.strip()
+
+                config = load_config()
+
+                if raw == "0":
+                    config["forced_sub_channel"] = ""
+                    config["forced_sub_link"] = ""
+                    save_config(config)
+                    context.user_data.pop(ADMIN_ACTION_KEY, None)
+
+                    await update.effective_message.reply_text(
+                        "✅ تم إلغاء الاشتراك الإجباري.",
+                        reply_markup=admin_menu(),
+                    )
+                    return
+
+                forced_sub_channel, forced_sub_link = normalize_channel_input(raw)
+
+                if forced_sub_channel.startswith("@"):
+                    chat = await context.bot.get_chat(forced_sub_channel)
+                    bot_info = await context.bot.get_me()
+                    member = await context.bot.get_chat_member(chat.id, bot_info.id)
+                    status = getattr(member, "status", "")
+                    if status not in ("administrator", "creator"):
+                        await update.effective_message.reply_text(
+                            "❌ يجب إضافة البوت داخل القناة ورفعه أدمن أولاً حتى يتمكن من التحقق من الاشتراك.",
+                            reply_markup=admin_menu(),
+                        )
+                        return
+
+                config["forced_sub_channel"] = forced_sub_channel
+                config["forced_sub_link"] = forced_sub_link
+                save_config(config)
+                context.user_data.pop(ADMIN_ACTION_KEY, None)
+
+                channel_view = forced_sub_channel
+                await update.effective_message.reply_text(
+                    f"✅ تم تعيين قناة الاشتراك الإجباري:\n{channel_view}",
+                    reply_markup=admin_menu(),
+                )
+            except Exception:
+                await update.effective_message.reply_text(
+                    "❌ أرسل يوزر قناة صحيح مثل @channelusername أو رابط صحيح للقناة العامة.",
                     reply_markup=admin_menu(),
                 )
             return
