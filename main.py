@@ -118,6 +118,7 @@ def load_config() -> dict:
             "forced_sub_channel": "",
             "forced_sub_link": "",
             "bot_enabled": True,
+            "referral_enabled": True,
         },
     )
     if "referral_points_per_invite" not in data:
@@ -130,6 +131,8 @@ def load_config() -> dict:
         data["forced_sub_link"] = ""
     if "bot_enabled" not in data:
         data["bot_enabled"] = True
+    if "referral_enabled" not in data:
+        data["referral_enabled"] = True
     return data
 
 
@@ -184,6 +187,11 @@ def is_blocked(user_id: int | None) -> bool:
 def is_bot_enabled() -> bool:
     config = load_config()
     return bool(config.get("bot_enabled", True))
+
+
+def is_referral_enabled() -> bool:
+    config = load_config()
+    return bool(config.get("referral_enabled", True))
 
 
 def ensure_user_exists(user) -> dict:
@@ -436,19 +444,17 @@ async def enforce_access(update: Update, context: ContextTypes.DEFAULT_TYPE, use
         return True
 
     if is_blocked(user_id):
-        target = update.callback_query if update.callback_query else update.effective_message
         if update.callback_query:
             await update.callback_query.edit_message_text(BLOCKED_TEXT)
         else:
-            await target.reply_text(BLOCKED_TEXT)
+            await update.effective_message.reply_text(BLOCKED_TEXT)
         return False
 
     if not is_bot_enabled():
-        target = update.callback_query if update.callback_query else update.effective_message
         if update.callback_query:
             await update.callback_query.edit_message_text(BOT_STOPPED_TEXT)
         else:
-            await target.reply_text(BOT_STOPPED_TEXT)
+            await update.effective_message.reply_text(BOT_STOPPED_TEXT)
         return False
 
     subscribed = await is_user_subscribed(context, user_id)
@@ -470,13 +476,20 @@ async def enforce_access(update: Update, context: ContextTypes.DEFAULT_TYPE, use
 
 # ================= واجهة القوائم =================
 def main_menu(user_id: int | None = None) -> InlineKeyboardMarkup:
-    rows = [
+    rows = []
+
+    if is_referral_enabled():
+        rows.append([InlineKeyboardButton("🎁 نظام الإحالة", callback_data="referral_menu")])
+
+    rows.extend(
         [
-            InlineKeyboardButton("💰 تحويل قديم → جديد", callback_data="old_to_new"),
-            InlineKeyboardButton("💵 تحويل جديد → قديم", callback_data="new_to_old"),
-        ],
-        [InlineKeyboardButton("ℹ️ شرح سريع", callback_data="quick_help")],
-    ]
+            [
+                InlineKeyboardButton("💰 تحويل قديم → جديد", callback_data="old_to_new"),
+                InlineKeyboardButton("💵 تحويل جديد → قديم", callback_data="new_to_old"),
+            ],
+            [InlineKeyboardButton("ℹ️ شرح سريع", callback_data="quick_help")],
+        ]
+    )
 
     if is_admin(user_id):
         rows.append([InlineKeyboardButton("⚙️ لوحة الأدمن", callback_data="admin_menu")])
@@ -506,6 +519,7 @@ def referral_menu() -> InlineKeyboardMarkup:
 def admin_menu() -> InlineKeyboardMarkup:
     config = load_config()
     bot_toggle_text = "🛑 إيقاف البوت" if config.get("bot_enabled", True) else "▶️ تشغيل البوت"
+    referral_toggle_text = "🙈 إخفاء نظام الإحالة" if config.get("referral_enabled", True) else "👁 إظهار نظام الإحالة"
 
     return InlineKeyboardMarkup(
         [
@@ -516,6 +530,7 @@ def admin_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⭐ تعديل مكافأة الإحالة", callback_data="admin_ref_points")],
             [InlineKeyboardButton("🎯 منح نقاط", callback_data="admin_grant_points")],
             [InlineKeyboardButton("📡 تعيين قناة الاشتراك", callback_data="admin_set_force_sub")],
+            [InlineKeyboardButton(referral_toggle_text, callback_data="admin_toggle_referral")],
             [InlineKeyboardButton(bot_toggle_text, callback_data="admin_toggle_bot")],
             [InlineKeyboardButton("📊 عدد المستخدمين", callback_data="admin_user_count")],
             [InlineKeyboardButton("🔙 رجوع", callback_data="back")],
@@ -757,6 +772,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ================= نظام الإحالة =================
     if q.data == "referral_menu":
+        if not is_referral_enabled() and not is_admin(user.id):
+            await q.answer("❌ نظام الإحالة مخفي حالياً.", show_alert=True)
+            return
+
         await q.edit_message_text(
             "🎁 نظام الإحالة\n\nاختر القسم الذي تريده:",
             reply_markup=referral_menu(),
@@ -962,6 +981,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "أو رابطها بهذا الشكل:\n"
             "https://t.me/channelusername\n\n"
             "أو أرسل 0 لإلغاء الاشتراك الإجباري.",
+            reply_markup=admin_menu(),
+        )
+        return
+
+    if q.data == "admin_toggle_referral":
+        if not is_admin(user.id):
+            return
+
+        config = load_config()
+        current = bool(config.get("referral_enabled", True))
+        config["referral_enabled"] = not current
+        save_config(config)
+
+        status_text = "✅ تم إظهار نظام الإحالة." if config["referral_enabled"] else "🙈 تم إخفاء نظام الإحالة."
+        await q.edit_message_text(
+            status_text,
             reply_markup=admin_menu(),
         )
         return
@@ -1355,7 +1390,6 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if admin_action == ADMIN_WAIT_FORCE_SUB_CHANNEL:
             try:
                 raw = text.strip()
-
                 config = load_config()
 
                 if raw == "0":
@@ -1389,9 +1423,8 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 save_config(config)
                 context.user_data.pop(ADMIN_ACTION_KEY, None)
 
-                channel_view = forced_sub_channel
                 await update.effective_message.reply_text(
-                    f"✅ تم تعيين قناة الاشتراك الإجباري:\n{channel_view}",
+                    f"✅ تم تعيين قناة الاشتراك الإجباري:\n{forced_sub_channel}",
                     reply_markup=admin_menu(),
                 )
             except Exception:
